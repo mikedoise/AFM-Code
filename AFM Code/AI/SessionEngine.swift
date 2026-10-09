@@ -54,10 +54,16 @@ final class SessionEngine {
         return nil
     }
 
-    /// The model this session will prompt, honoring the session's
-    /// explicit selection and falling back to the best available.
+    /// The model this session will prompt: the session's explicit
+    /// choice, then the project's default, then the best available.
     var activeModel: ModelDescriptor? {
-        catalog.descriptor(for: session.modelKind) ?? catalog.activeDescriptor
+        if let kind = session.modelKind {
+            return catalog.descriptor(for: kind)
+        }
+        if let kind = session.project?.modelKind {
+            return catalog.descriptor(for: kind)
+        }
+        return catalog.activeDescriptor
     }
 
     var contextSize: Int? { activeModel?.contextSize }

@@ -17,13 +17,17 @@ final class ChatSession {
     var transcriptData: Data?
     /// Token count of the last measured transcript, for the context meter.
     var lastTokenCount: Int?
+    /// The project (workspace folder) this session lives in.
+    /// `nil` for general sessions predating projects.
+    var project: Project?
 
     @Relationship(deleteRule: .cascade, inverse: \Message.session)
     var messages: [Message]?
 
-    init(title: String = "New Session") {
+    init(title: String = "New Session", project: Project? = nil) {
         self.id = UUID()
         self.title = title
+        self.project = project
         self.createdAt = Date()
         self.lastMessageAt = Date()
     }

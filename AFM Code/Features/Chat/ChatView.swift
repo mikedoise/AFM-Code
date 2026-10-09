@@ -40,8 +40,9 @@ struct ChatView: View {
                 Button {
                     session.modelKind = descriptor.kind
                 } label: {
+                    let isSelected = (engine?.activeModel ?? catalog.activeDescriptor)?.kind == descriptor.kind
                     if descriptor.isAvailable {
-                        Label(descriptor.displayName, systemImage: "checkmark")
+                        Label(descriptor.displayName, systemImage: isSelected ? "checkmark" : "circle")
                     } else if let detail = descriptor.availabilityDetail {
                         Text(detail)
                     } else {
