@@ -8,17 +8,24 @@ struct MessageRowView: View {
     let role: Message.Role
     let content: String
     var isStreaming: Bool = false
+    /// Tool activity persisted with the message (assistant turns).
+    var steps: [ToolStep]? = nil
+    /// Approval service for live cards; nil for history rows.
+    var approvals: ToolApprovalService? = nil
 
     init(message: Message) {
         self.role = message.role
         self.content = message.content
         self.isStreaming = false
+        self.steps = message.toolActivity
     }
 
-    init(role: Message.Role, content: String, isStreaming: Bool = false) {
+    init(role: Message.Role, content: String, isStreaming: Bool = false, steps: [ToolStep]? = nil, approvals: ToolApprovalService? = nil) {
         self.role = role
         self.content = content
         self.isStreaming = isStreaming
+        self.steps = steps
+        self.approvals = approvals
     }
 
     var body: some View {
@@ -36,14 +43,17 @@ struct MessageRowView: View {
                             .transition(.opacity)
                     }
                 }
-                Group {
-                    if role == .assistant {
-                        MarkdownText(text: content)
-                    } else {
-                        Text(content)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: 680, alignment: .leading)
+                if role == .assistant {
+                    if let steps, !steps.isEmpty {
+                        ToolStepListView(steps: steps, approvals: approvals)
                     }
+                    if !content.isEmpty {
+                        MarkdownText(text: content)
+                    }
+                } else {
+                    Text(content)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: 680, alignment: .leading)
                 }
             }
             if role == .user {

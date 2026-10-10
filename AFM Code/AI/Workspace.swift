@@ -69,7 +69,18 @@ final class Workspace {
         return try operation(url)
     }
 
-    private func releaseLease() {
+    /// Acquire the security-scoped lease so that *async* work (child
+    /// processes) can hold it across `await`s. A lease is a
+    /// URL-level permission, so it stays valid on other threads.
+    func acquireLease() -> Bool {
+        if isAccessing { return true }
+        guard let url = folderURL else { return false }
+        let accessed = url.startAccessingSecurityScopedResource()
+        isAccessing = accessed
+        return accessed
+    }
+
+    func releaseLease() {
         if isAccessing, let url = folderURL {
             url.stopAccessingSecurityScopedResource()
             isAccessing = false

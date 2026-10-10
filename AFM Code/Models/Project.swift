@@ -19,16 +19,22 @@ final class Project {
     /// `ModelDescriptor.Kind.rawValue` used for new sessions in this
     /// project. `nil` means "best available on-device model".
     var modelKindRaw: String?
+    /// Commands the user chose "Always Allow" for in this project.
+    /// Exact match after whitespace normalization. Optional (not an
+    /// empty array) so the schema migration can backfill existing
+    /// rows with `nil`.
+    var commandAllowlist: [String]?
     var createdAt: Date
     var lastOpenedAt: Date
 
     @Relationship(deleteRule: .cascade, inverse: \ChatSession.project)
     var sessions: [ChatSession]?
 
-    init(name: String, folderName: String? = nil) {
+    init(name: String, folderName: String? = nil, commandAllowlist: [String]? = nil) {
         self.id = UUID()
         self.name = name
         self.folderName = folderName ?? name
+        self.commandAllowlist = commandAllowlist
         self.createdAt = Date()
         self.lastOpenedAt = Date()
     }

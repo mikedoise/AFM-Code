@@ -44,6 +44,10 @@ struct ProjectOverviewView: View {
             .padding(20)
 
             List {
+                if !(project.commandAllowlist ?? []).isEmpty {
+                    allowlistSection
+                }
+
                 ForEach(project.sessionList) { session in
                     Button {
                         chat.selection = .session(session.id)
@@ -156,6 +160,54 @@ struct ProjectOverviewView: View {
         .background(.orange.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .padding([.horizontal, .bottom], 20)
+    }
+
+    // MARK: - Command allowlist
+
+    private var allowlistSection: some View {
+        Section {
+            ForEach(project.commandAllowlist ?? [], id: \.self) { command in
+                HStack(spacing: 8) {
+                    Image(systemName: "terminal")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(command)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer()
+                    Button {
+                        removeCommand(command)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove from the allowlist")
+                }
+            }
+            HStack {
+                Text("The agent runs these commands without asking.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Clear All") {
+                    project.commandAllowlist = []
+                    try? modelContext.save()
+                }
+                .font(.caption)
+            }
+            .padding(.top, 4)
+        } header: {
+            Text("Allowed Commands (\((project.commandAllowlist ?? []).count))")
+        }
+    }
+
+    private func removeCommand(_ command: String) {
+        project.commandAllowlist = (project.commandAllowlist ?? []).filter { $0 != command }
+        try? modelContext.save()
     }
 
     // MARK: - Actions

@@ -10,8 +10,10 @@ import SwiftData
 /// into UI state, persists the transcript for resume, and tracks
 /// context usage. One engine per `ChatSession`, held by `ChatController`.
 ///
-/// The engine is the presentation-facing half of the AI layer:
-/// `ModelCatalog` reports what models exist, the engine uses one.
+/// Phase 3: when the session belongs to a project, the engine also owns
+/// the tool runtime (`ToolContext` + `ToolApprovalService`). The coding
+/// tools ride inside the model session — the framework runs the
+/// tool-call loop; the tools do the work; approvals pause it.
 @MainActor
 @Observable
 final class SessionEngine {
@@ -26,6 +28,7 @@ final class SessionEngine {
     let session: ChatSession
     private let modelContext: ModelContext
     private let catalog: ModelCatalog
+    private(set) var toolContext: ToolContext?
 
     private(set) var state: State = .idle
     /// Live token text for the in-flight assistant response.
@@ -37,11 +40,24 @@ final class SessionEngine {
 
     private var languageModelSession: LanguageModelSession?
     private var sendTask: Task<Void, Never>?
+    /// Whether the model session was created with the coding tools.
+    private var sessionHasTools = false
 
-    init(session: ChatSession, modelContext: ModelContext, catalog: ModelCatalog) {
+    init(
+        session: ChatSession,
+        modelContext: ModelContext,
+        catalog: ModelCatalog,
+        workspaces: WorkspaceStore
+    ) {
         self.session = session
         self.modelContext = modelContext
         self.catalog = catalog
+        self.toolContext = nil
+        if let project = session.project {
+            let workspace = workspaces.workspace(for: project)
+            let approvals = ToolApprovalService(project: project)
+            self.toolContext = ToolContext(session: session, workspace: workspace, approvals: approvals)
+        }
         self.contextTokenCount = session.lastTokenCount
     }
 
@@ -68,6 +84,11 @@ final class SessionEngine {
 
     var contextSize: Int? { activeModel?.contextSize }
 
+    /// Live tool activity for the in-flight turn (drives the UI).
+    var toolSteps: [ToolStep] { toolContext?.steps ?? [] }
+
+    var approvals: ToolApprovalService? { toolContext?.approvals }
+
     // MARK: - Session lifecycle
 
     /// Lazily create the underlying `LanguageModelSession`, resuming
@@ -76,20 +97,49 @@ final class SessionEngine {
         guard languageModelSession == nil else { return }
         let model = SystemLanguageModel.default
 
+        // Tools only when the model variant supports them and this
+        // session has a project folder to work in.
+        let supportsTools = model.isAvailable && model.capabilities.contains(.toolCalling)
+        let tools = (supportsTools && toolContext != nil)
+            ? CodingTools(context: toolContext!).tools
+            : []
+        sessionHasTools = !tools.isEmpty
+
         if let data = session.transcriptData,
-           let transcript = try? JSONDecoder().decode(Transcript.self, from: data) {
+           var transcript = try? JSONDecoder().decode(Transcript.self, from: data) {
+            // Refresh the instructions entry so the model always sees
+            // the current prompt and tool definitions.
+            let instructionsEntry = Self.makeInstructionsEntry(tools: tools)
+            if let first = transcript.first, case .instructions = first {
+                transcript[0] = instructionsEntry
+            } else {
+                transcript.insert(instructionsEntry, at: transcript.startIndex)
+            }
             languageModelSession = LanguageModelSession(
                 model: model,
-                tools: [],
+                tools: tools,
                 transcript: transcript
             )
         } else {
-            languageModelSession = LanguageModelSession(model: model) {
-                AgentInstructions.defaultSystemPrompt
+            languageModelSession = LanguageModelSession(model: model, tools: tools) {
+                AgentInstructions.prompt(includesTools: !tools.isEmpty)
             }
         }
         languageModelSession?.transcriptErrorHandlingPolicy = .revertTranscript
         prewarm()
+    }
+
+    /// Rebuild the instructions transcript entry with the current
+    /// prompt and tool definitions.
+    private static func makeInstructionsEntry(tools: [any Tool]) -> Transcript.Entry {
+        let text = Transcript.TextSegment(content: AgentInstructions.prompt(includesTools: !tools.isEmpty))
+        let definitions = tools.map { Transcript.ToolDefinition(tool: $0) }
+        let instructions = Transcript.Instructions(
+            id: UUID().uuidString,
+            segments: [Transcript.Segment.text(text)],
+            toolDefinitions: definitions
+        )
+        return Transcript.Entry.instructions(instructions)
     }
 
     /// Ask the framework to load and cache the session ahead of a turn.
@@ -116,6 +166,10 @@ final class SessionEngine {
             return
         }
 
+        if sessionHasTools {
+            toolContext?.beginTurn()
+        }
+
         state = .responding
         streamingText = ""
         sendTask = Task { [weak self] in
@@ -129,30 +183,55 @@ final class SessionEngine {
 
     private func runTurn(prompt: String) async {
         guard let languageModelSession else { return }
+
+        var options = GenerationOptions()
+        if sessionHasTools {
+            options.toolCallingMode = .allowed
+        }
+
         do {
-            let stream = languageModelSession.streamResponse(to: Prompt(prompt))
+            let stream = languageModelSession.streamResponse(to: Prompt(prompt), options: options)
             for try await snapshot in stream {
                 streamingText = snapshot.content
             }
             let response = try await stream.collect()
             finalizeAssistantResponse(response)
             state = .idle
-        } catch is CancellationError {
-            Self.logger.info("turn cancelled")
-            persistPartialAssistantMessage()
-            state = .idle
-        } catch let error as LanguageModelError {
-            Self.logger.error("turn failed: \(error)")
-            persistPartialAssistantMessage()
-            state = .error(Self.describe(error))
         } catch {
-            Self.logger.error("turn failed: \(error.localizedDescription)")
-            persistPartialAssistantMessage()
-            state = .error(error.localizedDescription)
+            handleTurnFailure(error)
+        }
+        if sessionHasTools {
+            toolContext?.endTurn()
         }
         streamingText = ""
         await persistTranscript()
         refreshContextUsage()
+    }
+
+    private func handleTurnFailure(_ error: any Error) {
+        let wasCancelled: Bool
+        if error is CancellationError {
+            wasCancelled = true
+        } else if let toolError = error as? LanguageModelSession.ToolCallError {
+            // A tool only throws for cancellation in this app.
+            wasCancelled = toolError.underlyingError is CancellationError
+        } else {
+            wasCancelled = false
+        }
+
+        if wasCancelled {
+            Self.logger.info("turn cancelled")
+            persistPartialAssistantMessage()
+            state = .idle
+        } else if let modelError = error as? LanguageModelError {
+            Self.logger.error("turn failed: \(modelError)")
+            persistPartialAssistantMessage()
+            state = .error(Self.describe(modelError))
+        } else {
+            Self.logger.error("turn failed: \(error.localizedDescription)")
+            persistPartialAssistantMessage()
+            state = .error(error.localizedDescription)
+        }
     }
 
     // MARK: - Persistence
@@ -168,20 +247,24 @@ final class SessionEngine {
 
     private func finalizeAssistantResponse(_ response: LanguageModelSession.Response<String>) {
         let text = response.content
-        guard !text.isEmpty else { return }
+        let steps = toolContext?.turnSteps ?? []
+        guard !text.isEmpty || !steps.isEmpty else { return }
         let message = Message(role: .assistant, content: text)
         message.tokenCount = response.usage.totalTokenCount
         lastResponseTokens = response.usage.totalTokenCount
+        message.toolActivity = steps.isEmpty ? nil : steps
         modelContext.insert(message)
         session.messages?.append(message)
     }
 
-    /// Keep whatever partial text the user saw before an interruption,
-    /// so the transcript reads the same on resume.
+    /// Keep whatever partial text and tool activity the user saw before
+    /// an interruption, so the transcript reads the same on resume.
     private func persistPartialAssistantMessage() {
         let text = streamingText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let steps = toolContext?.turnSteps ?? []
+        guard !text.isEmpty || !steps.isEmpty else { return }
         let message = Message(role: .assistant, content: text)
+        message.toolActivity = steps.isEmpty ? nil : steps
         modelContext.insert(message)
         session.messages?.append(message)
     }

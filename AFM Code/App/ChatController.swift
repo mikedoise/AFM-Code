@@ -23,12 +23,18 @@ final class ChatController {
     func engine(
         for session: ChatSession,
         modelContext: ModelContext,
-        catalog: ModelCatalog
+        catalog: ModelCatalog,
+        workspaces: WorkspaceStore
     ) -> SessionEngine {
         if let existing = engines[session.id] {
             return existing
         }
-        let engine = SessionEngine(session: session, modelContext: modelContext, catalog: catalog)
+        let engine = SessionEngine(
+            session: session,
+            modelContext: modelContext,
+            catalog: catalog,
+            workspaces: workspaces
+        )
         engines[session.id] = engine
         return engine
     }

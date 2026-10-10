@@ -16,17 +16,21 @@ struct MessageListView: View {
                     }
 
                     if let engine, engine.isBusy {
-                        if engine.streamingText.isEmpty {
-                            thinkingPlaceholder
-                                .id(Self.streamAnchor(session))
-                        } else {
-                            MessageRowView(
-                                role: .assistant,
-                                content: engine.streamingText,
-                                isStreaming: true
-                            )
-                            .id(Self.streamAnchor(session))
+                        VStack(alignment: .leading, spacing: 12) {
+                            if !engine.toolSteps.isEmpty {
+                                ToolStepListView(steps: engine.toolSteps, approvals: engine.approvals)
+                            }
+                            if engine.streamingText.isEmpty {
+                                thinkingPlaceholder
+                            } else {
+                                MessageRowView(
+                                    role: .assistant,
+                                    content: engine.streamingText,
+                                    isStreaming: true
+                                )
+                            }
                         }
+                        .id(Self.streamAnchor(session))
                     }
 
                     if let engine, let error = engine.errorMessage {
@@ -45,6 +49,13 @@ struct MessageListView: View {
             }
             .defaultScrollAnchor(.bottom)
             .onChange(of: engine?.streamingText) {
+                if let engine, engine.isBusy {
+                    withAnimation(.linear(duration: 0.1)) {
+                        proxy.scrollTo(Self.streamAnchor(session), anchor: .bottom)
+                    }
+                }
+            }
+            .onChange(of: engine?.toolSteps.count) {
                 if let engine, engine.isBusy {
                     withAnimation(.linear(duration: 0.1)) {
                         proxy.scrollTo(Self.streamAnchor(session), anchor: .bottom)
