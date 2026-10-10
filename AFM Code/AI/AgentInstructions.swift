@@ -20,6 +20,8 @@ enum AgentInstructions {
         var structure: String?
         /// A short README excerpt, when one exists.
         var readme: String?
+        /// Whether the project root is a checked-out Git repository.
+        var isGitRepository: Bool = false
     }
 
     /// Models with at least this much context get the full prompt.
@@ -94,18 +96,41 @@ enum AgentInstructions {
     You have no file or shell tools in this session. If you need code, logs, or output that you can't see, ask the user to paste it before asserting specifics.
     """
 
+    /// Appended when the project is a Git repository. Small models in
+    /// particular need to be told the repo is already checked out and
+    /// how to inspect it — and its history — without cloning.
+    private static let gitSection = """
+
+    The project folder is a checked-out Git repository. It is already on this machine — never clone it to inspect it.
+    - Inspect state: git status, git diff, git branch -a, git remote -v, git log --oneline -20.
+    - Explore history: git show <sha>, git diff <sha>~1..<sha>, git log -S<symbol> --oneline, git log --oneline -- <path>.
+    - Read each output before deciding the next step.
+    """
+
     private static func projectSection(_ project: ProjectInfo) -> String {
         var section = """
         Project: \(project.name)
         Project folder: \(project.rootPath) (the root for all file paths)
         """
         if let structure = project.structure, !structure.isEmpty {
-            section += "\nCurrent structure:\n\(structure)\n"
+            section += "\nCurrent structure:\n" + capped(structure, 1_600) + "\n"
         }
         if let readme = project.readme, !readme.isEmpty {
-            section += "\nREADME excerpt:\n\(readme)\n"
+            section += "\nREADME excerpt:\n" + capped(readme, 1_200) + "\n"
         }
         return section
+    }
+
+    /// The prompt is re-sent with every request, so unbounded excerpts
+    /// would eat the model's context window (small ones especially).
+    /// Truncate at a line boundary.
+    private static func capped(_ text: String, _ limit: Int) -> String {
+        guard text.count > limit else { return text }
+        var end = text.index(text.startIndex, offsetBy: limit)
+        if text[end] != "\n", let newline = text[end...].firstIndex(of: "\n") {
+            end = newline
+        }
+        return String(text[..<end]) + "\n… (truncated)"
     }
 
     /// The prompt actually given to the model.
@@ -122,6 +147,9 @@ enum AgentInstructions {
         var prompt = base(basePrompt, contextSize: contextSize)
         if let project {
             prompt += "\n" + projectSection(project)
+            if includesTools, project.isGitRepository {
+                prompt += gitSection
+            }
         }
         prompt += includesTools ? toolsSection : noToolsSection
         return prompt

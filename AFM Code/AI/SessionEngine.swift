@@ -43,6 +43,11 @@ final class SessionEngine {
     private(set) var contextTokenCount: Int?
     /// Output tokens of the most recent completed response.
     private(set) var lastResponseTokens: Int?
+    /// The context window the model on this Mac actually accepts, as
+    /// learned from a failure that reveals it. On some machines the
+    /// model refuses input beyond a window smaller than its advertised
+    /// `contextSize`; the smallest limit observed so far wins.
+    private(set) var effectiveContextSize: Int?
 
     private var languageModelSession: LanguageModelSession?
     private var sendTask: Task<Void, Never>?
@@ -95,7 +100,11 @@ final class SessionEngine {
         return catalog.activeDescriptor
     }
 
-    var contextSize: Int? { activeModel?.contextSize }
+    /// The session's real context window: a runtime limit observed
+    /// from a failure, else the model's advertised size.
+    var contextSize: Int? {
+        effectiveContextSize ?? activeModel?.contextSize
+    }
 
     /// Live tool activity for the in-flight turn (drives the UI).
     var toolSteps: [ToolStep] { toolContext?.steps ?? [] }
@@ -122,7 +131,7 @@ final class SessionEngine {
             includesTools: !tools.isEmpty,
             project: Self.makeProjectInfo(toolContext: toolContext),
             basePrompt: settings.systemPrompt,
-            contextSize: model.isAvailable ? model.contextSize : nil
+            contextSize: effectiveContextSize ?? (model.isAvailable ? model.contextSize : nil)
         )
 
         if let data = session.transcriptData,
@@ -161,6 +170,7 @@ final class SessionEngine {
             structure: nil,
             readme: nil
         )
+        info.isGitRepository = toolContext.fileExists(".git")
         info.structure = try? toolContext.listDirectory(path: ".", maxDepth: 2)
         for candidate in ["README.md", "README", "README.rst", "readme.md", "README.txt"] {
             if let text = try? toolContext.readFileContent(path: candidate, maxLines: 60) {
@@ -205,7 +215,9 @@ final class SessionEngine {
 
     func send(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !isBusy else { return }
+        // Also while a compaction pass is rebuilding the session — a
+        // send mid-rebuild would race the rebuild.
+        guard !trimmed.isEmpty, !isBusy, !isCompacting else { return }
 
         let selectedModel = activeModel
         guard let selectedModel, selectedModel.isAvailable else {
@@ -237,6 +249,12 @@ final class SessionEngine {
     private func runTurn(prompt: String) async {
         guard languageModelSession != nil else { return }
 
+        // Measure against the model's real window before sending, so a
+        // transcript that grew since the last turn compacts *before*
+        // it overflows, not only after a turn dies on the wall.
+        await refreshContextUsage()
+        await maybeCompact()
+
         var attempt = 0
         while true {
             attempt += 1
@@ -247,6 +265,17 @@ final class SessionEngine {
             // rebuilt session — exactly once.
             guard needsCompaction, attempt == 1 else { break }
             guard await compactHistory(keepRecentTurn: false) else { break }
+        }
+
+        // A failure whose recovery never ran (nothing left to compact,
+        // or the retry also hit the wall) ends the turn still flagged
+        // as responding — settle it so the composer isn't stuck busy.
+        if state == .responding {
+            persistPartialAssistantMessage()
+            state = .error(
+                "This session's context is full and it couldn't be compressed to fit. "
+                + "Start a new session to keep going — the transcript above is preserved."
+            )
         }
 
         if sessionHasTools {
@@ -296,12 +325,26 @@ final class SessionEngine {
             // plain text, so a rebuilt session sidesteps the problem).
             if let modelError = error as? LanguageModelError {
                 switch modelError {
-                case .contextSizeExceeded, .unsupportedTranscriptContent:
+                case .contextSizeExceeded(let payload):
+                    recordRuntimeWindow(payload.contextSize)
+                    Self.logger.info("turn failed: \(modelError); rebuilding the transcript")
+                    return true
+                case .unsupportedTranscriptContent:
                     Self.logger.info("turn failed: \(modelError); rebuilding the transcript")
                     return true
                 default:
                     break
                 }
+            }
+            // The 27 SDK surfaces some window overflows as plain
+            // inference failures rather than a typed
+            // contextSizeExceeded error — e.g. "Provided 9,610 tokens,
+            // but the maximum allowed is 8,192." Detect that shape, note
+            // the real window, and recover the same way.
+            if let window = Self.contextWindow(from: error) {
+                recordRuntimeWindow(window)
+                Self.logger.info("turn failed (\(error.localizedDescription)); rebuilding the transcript")
+                return true
             }
             handleTurnFailure(error)
             return false
@@ -415,7 +458,7 @@ final class SessionEngine {
         guard !isCompacting else { return }
         let model = SystemLanguageModel.default
         guard model.isAvailable else { return }
-        let size = model.contextSize
+        let size = effectiveContextSize ?? model.contextSize
         guard size > 0 else { return }
 
         var used = contextTokenCount
@@ -508,7 +551,7 @@ final class SessionEngine {
             includesTools: sessionHasTools,
             project: Self.makeProjectInfo(toolContext: toolContext),
             basePrompt: settings.systemPrompt,
-            contextSize: model.isAvailable ? model.contextSize : nil
+            contextSize: effectiveContextSize ?? (model.isAvailable ? model.contextSize : nil)
         )
         var newEntries: [Transcript.Entry] = [
             Self.makeInstructionsEntry(prompt: prompt, tools: sessionHasTools ? sessionTools : [])
@@ -557,6 +600,45 @@ final class SessionEngine {
     - Under 600 words.
     - Output only the summary.
     """
+
+    // MARK: - Runtime window
+
+    /// The input window a failing turn reveals, when the failure message
+    /// carries one. The 27 SDK reports some overflows as plain inference
+    /// failures, but the message still names the maximum the model accepts
+    /// ("Provided … tokens, but the maximum allowed is N").
+    private static func contextWindow(from error: any Error) -> Int? {
+        let description = (error as? LanguageModelError)?.localizedDescription
+            ?? error.localizedDescription
+        guard description.range(of: "provided", options: .caseInsensitive) != nil,
+              let range = description.range(of: "maximum allowed is ") else {
+            return nil
+        }
+        var digits = ""
+        for character in description[range.upperBound...] {
+            if character.isNumber {
+                digits.append(character)
+            } else if character == "," {
+                continue // thousands separator
+            } else {
+                break
+            }
+        }
+        guard let value = Int(digits), value > 0 else { return nil }
+        return value
+    }
+
+    /// Remember the real input window when a failure reveals one. The
+    /// advertised `contextSize` is per variant; the model this Mac is
+    /// served may accept less. The smallest limit wins, so compaction and
+    /// the context gauge stay under what actually works.
+    private func recordRuntimeWindow(_ window: Int) {
+        guard window > 0 else { return }
+        if let current = effectiveContextSize, current <= window { return }
+        let advertised = activeModel?.contextSize ?? 0
+        effectiveContextSize = window
+        Self.logger.info("noted runtime context window: \(window) tokens (advertised \(advertised))")
+    }
 
     // MARK: - Transcript rendering (for the compactor)
 

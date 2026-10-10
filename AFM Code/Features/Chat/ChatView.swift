@@ -41,6 +41,7 @@ struct ChatView: View {
         Menu {
             Button {
                 session.modelKind = nil
+                try? modelContext.save()
             } label: {
                 let isSelected = session.modelKind == nil
                 VStack(alignment: .leading, spacing: 2) {
@@ -59,6 +60,7 @@ struct ChatView: View {
             ForEach(catalog.descriptors) { descriptor in
                 Button {
                     session.modelKind = descriptor.kind
+                    try? modelContext.save()
                 } label: {
                     let isSelected = session.modelKind == descriptor.kind && descriptor.isAvailable
                     VStack(alignment: .leading, spacing: 2) {
@@ -96,9 +98,6 @@ struct ChatView: View {
             }
         }
         .help("Model for this session")
-        .onChange(of: session.modelKindRaw) {
-            try? modelContext.save()
-        }
     }
 
     /// "tools · reasoning · vision" from the descriptor's capability

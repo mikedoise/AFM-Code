@@ -213,6 +213,15 @@ final class ToolContext {
         )
     }
 
+    /// Whether a file or directory exists at a path inside the project.
+    /// `false` when the path is missing or the folder is unavailable.
+    func fileExists(_ path: String) -> Bool {
+        guard let url = try? resolvePath(path) else { return false }
+        return workspace.withAccess { _ in
+            FileManager.default.fileExists(atPath: url.path)
+        } ?? false
+    }
+
     /// The file's text content (capped), or `nil` when it doesn't exist.
     func readFileContent(path: String, maxLines: Int = 4000) throws -> String? {
         let url = try resolvePath(path)

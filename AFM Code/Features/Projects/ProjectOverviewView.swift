@@ -73,12 +73,6 @@ struct ProjectOverviewView: View {
         }
         .navigationTitle(project.name)
         .id(project.id)
-        .onChange(of: project.modelKindRaw) {
-            try? modelContext.save()
-        }
-        .onChange(of: project.approvalModeRaw) {
-            try? modelContext.save()
-        }
         .onAppear {
             workspace.refresh()
             project.lastOpenedAt = Date()
@@ -172,20 +166,28 @@ struct ProjectOverviewView: View {
     }
 
     // MARK: - Settings
+    //
+    // These Pickers use guarded bindings on purpose. A Picker re-asserts
+    // its selection on every body evaluation; writing that back through
+    // the @Model's stored raw value invalidates the view again, looping
+    // within a frame ("onChange… tried to update multiple times per
+    // frame"). The bindings drop same-value writes, and a not-yet-probed
+    // catalog can never mismatch the selection and clobber the saved
+    // choice, because the current value is always among the tags. Real
+    // changes persist immediately.
 
     @ViewBuilder
     private var settingsSection: some View {
-        @Bindable var project = project
         Section {
-            Picker("Model", selection: $project.modelKind) {
+            Picker("Model", selection: modelKindBinding) {
                 Text("Best available").tag(ModelDescriptor.Kind?.none)
-                ForEach(catalog.descriptors) { descriptor in
-                    Text(descriptor.displayName).tag(Optional(descriptor.kind))
+                ForEach(modelKindOptions, id: \.self) { kind in
+                    Text(kindLabel(for: kind)).tag(Optional(kind))
                 }
             }
             .help("Default model for new sessions in this project.")
 
-            Picker("Approvals", selection: $project.approvalMode) {
+            Picker("Approvals", selection: approvalModeBinding) {
                 Text(ApprovalMode.ask.label).tag(ApprovalMode?.none)
                 ForEach(ApprovalMode.allCases, id: \.self) { mode in
                     Text(mode.label).tag(Optional(mode))
@@ -194,6 +196,51 @@ struct ProjectOverviewView: View {
             .help("Auto-approve runs file changes and commands without an approval card. Useful for trusted or scratch projects; the command allowlist still applies.")
         } header: {
             Text("Settings")
+        }
+    }
+
+    private var modelKindBinding: Binding<ModelDescriptor.Kind?> {
+        Binding(
+            get: { project.modelKind },
+            set: { newValue in
+                if project.modelKind != newValue {
+                    project.modelKind = newValue
+                    try? modelContext.save()
+                }
+            }
+        )
+    }
+
+    private var approvalModeBinding: Binding<ApprovalMode?> {
+        Binding(
+            get: { project.approvalMode },
+            set: { newValue in
+                if project.approvalMode != newValue {
+                    project.approvalMode = newValue
+                    try? modelContext.save()
+                }
+            }
+        )
+    }
+
+    /// The catalog's model kinds, plus the saved choice if the catalog
+    /// hasn't probed it yet, so the Picker's tags always include the
+    /// current selection.
+    private var modelKindOptions: [ModelDescriptor.Kind] {
+        var kinds = catalog.descriptors.map(\.kind)
+        if let current = project.modelKind, !kinds.contains(current) {
+            kinds.append(current)
+        }
+        return kinds
+    }
+
+    private func kindLabel(for kind: ModelDescriptor.Kind) -> String {
+        if let descriptor = catalog.descriptor(for: kind) {
+            return descriptor.displayName
+        }
+        switch kind {
+        case .afmCore: return "AFM 3 Core"
+        case .afmCoreAdvanced: return "AFM 3 Core Advanced"
         }
     }
 
