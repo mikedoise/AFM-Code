@@ -24,6 +24,9 @@ final class Project {
     /// empty array) so the schema migration can backfill existing
     /// rows with `nil`.
     var commandAllowlist: [String]?
+    /// `ApprovalMode.rawValue` for this project. `nil` means "always
+    /// ask". Optional so the schema migration backfills existing rows.
+    var approvalModeRaw: String?
     var createdAt: Date
     var lastOpenedAt: Date
 
@@ -42,6 +45,11 @@ final class Project {
     var modelKind: ModelDescriptor.Kind? {
         get { modelKindRaw.flatMap(ModelDescriptor.Kind.init(rawValue:)) }
         set { modelKindRaw = newValue?.rawValue }
+    }
+
+    var approvalMode: ApprovalMode? {
+        get { approvalModeRaw.flatMap(ApprovalMode.init(rawValue:)) }
+        set { approvalModeRaw = newValue?.rawValue }
     }
 
     /// Most recent sessions first.

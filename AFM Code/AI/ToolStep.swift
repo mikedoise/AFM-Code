@@ -108,6 +108,19 @@ struct DiffData: Codable, Equatable, Sendable {
 
     var additions: Int { lines.lazy.filter { $0.kind == .addition }.count }
     var removals: Int { lines.lazy.filter { $0.kind == .removal }.count }
+
+    /// The diff as unified-style text, for the copy button.
+    var unifiedText: String {
+        lines.map { line in
+            let prefix: String = switch line.kind {
+            case .context: " "
+            case .addition: "+"
+            case .removal: "-"
+            }
+            return prefix + line.text
+        }
+        .joined(separator: "\n")
+    }
 }
 
 /// A small LCS line-diff, sized for Phase 3 previews.

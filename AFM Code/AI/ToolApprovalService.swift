@@ -11,6 +11,21 @@ enum ApprovalDecision: Equatable, Sendable {
     case cancelled
 }
 
+/// How strictly a project gates the agent's mutating tools.
+enum ApprovalMode: String, Codable, CaseIterable, Sendable {
+    /// Every file write/edit and command asks the user first.
+    case ask
+    /// Trusted project: changes and commands run without an approval card.
+    case auto
+
+    var label: String {
+        switch self {
+        case .ask: return "Always ask"
+        case .auto: return "Auto-approve changes"
+        }
+    }
+}
+
 /// Owns the approval lifecycle for tool calls that mutate anything.
 ///
 /// A mutating tool registers its step as pending, then suspends in
@@ -54,10 +69,15 @@ final class ToolApprovalService {
 
     /// Suspend until the UI decides or the turn is cancelled.
     ///
-    /// Commands already on the allowlist fast-path straight through.
+    /// Commands already on the allowlist fast-path straight through,
+    /// and so does everything else when the project is set to
+    /// auto-approve (a trusted project needs no round trip).
     func wait(for id: UUID, command: String? = nil) async -> ApprovalDecision {
         if let command, commandIsAllowed(command) {
             return .alwaysAllow
+        }
+        if project?.approvalMode == .auto {
+            return .approve
         }
         registerPending(id)
         return await withTaskCancellationHandler {

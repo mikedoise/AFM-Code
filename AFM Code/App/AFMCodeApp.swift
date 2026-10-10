@@ -6,6 +6,7 @@ struct AFMCodeApp: App {
     @State private var catalog = ModelCatalog()
     @State private var chat = ChatController()
     @State private var workspaces = WorkspaceStore()
+    @State private var settings = AppSettings()
 
     var body: some Scene {
         WindowGroup {
@@ -13,6 +14,7 @@ struct AFMCodeApp: App {
                 .environment(catalog)
                 .environment(chat)
                 .environment(workspaces)
+                .environment(settings)
                 .modelContainer(ModelContainerProvider.container)
                 .frame(minWidth: 860, minHeight: 540)
                 .focusedSceneValue(\.afmChat, chat)
@@ -23,6 +25,11 @@ struct AFMCodeApp: App {
         .defaultSize(width: 1280, height: 800)
         .commands {
             NewSessionCommands()
+        }
+        Settings {
+            SettingsView()
+                .environment(catalog)
+                .environment(settings)
         }
     }
 }

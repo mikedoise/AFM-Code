@@ -24,7 +24,8 @@ final class ChatController {
         for session: ChatSession,
         modelContext: ModelContext,
         catalog: ModelCatalog,
-        workspaces: WorkspaceStore
+        workspaces: WorkspaceStore,
+        settings: AppSettings
     ) -> SessionEngine {
         if let existing = engines[session.id] {
             return existing
@@ -33,7 +34,8 @@ final class ChatController {
             session: session,
             modelContext: modelContext,
             catalog: catalog,
-            workspaces: workspaces
+            workspaces: workspaces,
+            settings: settings
         )
         engines[session.id] = engine
         return engine

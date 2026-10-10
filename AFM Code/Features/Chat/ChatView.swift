@@ -8,6 +8,7 @@ struct ChatView: View {
     @Environment(ModelCatalog.self) private var catalog
     @Environment(ChatController.self) private var chat
     @Environment(WorkspaceStore.self) private var workspaces
+    @Environment(AppSettings.self) private var settings
     @Environment(\.modelContext) private var modelContext
     @State private var engine: SessionEngine?
 
@@ -26,7 +27,7 @@ struct ChatView: View {
         }
         .onAppear {
             if engine == nil {
-                engine = chat.engine(for: session, modelContext: modelContext, catalog: catalog, workspaces: workspaces)
+                engine = chat.engine(for: session, modelContext: modelContext, catalog: catalog, workspaces: workspaces, settings: settings)
             }
             engine?.prewarm()
         }

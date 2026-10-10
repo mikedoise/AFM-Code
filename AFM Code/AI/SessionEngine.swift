@@ -33,6 +33,7 @@ final class SessionEngine {
     let session: ChatSession
     private let modelContext: ModelContext
     private let catalog: ModelCatalog
+    private let settings: AppSettings
     private(set) var toolContext: ToolContext?
 
     private(set) var state: State = .idle
@@ -57,11 +58,13 @@ final class SessionEngine {
         session: ChatSession,
         modelContext: ModelContext,
         catalog: ModelCatalog,
-        workspaces: WorkspaceStore
+        workspaces: WorkspaceStore,
+        settings: AppSettings
     ) {
         self.session = session
         self.modelContext = modelContext
         self.catalog = catalog
+        self.settings = settings
         self.toolContext = nil
         if let project = session.project {
             let workspace = workspaces.workspace(for: project)
@@ -117,7 +120,9 @@ final class SessionEngine {
         sessionTools = tools
         let prompt = AgentInstructions.prompt(
             includesTools: !tools.isEmpty,
-            project: Self.makeProjectInfo(toolContext: toolContext)
+            project: Self.makeProjectInfo(toolContext: toolContext),
+            basePrompt: settings.systemPrompt,
+            contextSize: model.isAvailable ? model.contextSize : nil
         )
 
         if let data = session.transcriptData,
@@ -494,7 +499,9 @@ final class SessionEngine {
     ) {
         let prompt = AgentInstructions.prompt(
             includesTools: sessionHasTools,
-            project: Self.makeProjectInfo(toolContext: toolContext)
+            project: Self.makeProjectInfo(toolContext: toolContext),
+            basePrompt: settings.systemPrompt,
+            contextSize: model.isAvailable ? model.contextSize : nil
         )
         var newEntries: [Transcript.Entry] = [
             Self.makeInstructionsEntry(prompt: prompt, tools: sessionHasTools ? sessionTools : [])

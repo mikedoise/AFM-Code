@@ -12,6 +12,7 @@ struct ProjectOverviewView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ChatController.self) private var chat
     @Environment(WorkspaceStore.self) private var workspaces
+    @Environment(ModelCatalog.self) private var catalog
 
     var body: some View {
         @Bindable var chat = chat
@@ -44,6 +45,8 @@ struct ProjectOverviewView: View {
             .padding(20)
 
             List {
+                settingsSection
+
                 if !(project.commandAllowlist ?? []).isEmpty {
                     allowlistSection
                 }
@@ -70,6 +73,12 @@ struct ProjectOverviewView: View {
         }
         .navigationTitle(project.name)
         .id(project.id)
+        .onChange(of: project.modelKindRaw) {
+            try? modelContext.save()
+        }
+        .onChange(of: project.approvalModeRaw) {
+            try? modelContext.save()
+        }
         .onAppear {
             workspace.refresh()
             project.lastOpenedAt = Date()
@@ -160,6 +169,32 @@ struct ProjectOverviewView: View {
         .background(.orange.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .padding([.horizontal, .bottom], 20)
+    }
+
+    // MARK: - Settings
+
+    @ViewBuilder
+    private var settingsSection: some View {
+        @Bindable var project = project
+        Section {
+            Picker("Model", selection: $project.modelKind) {
+                Text("Best available").tag(ModelDescriptor.Kind?.none)
+                ForEach(catalog.descriptors) { descriptor in
+                    Text(descriptor.displayName).tag(Optional(descriptor.kind))
+                }
+            }
+            .help("Default model for new sessions in this project.")
+
+            Picker("Approvals", selection: $project.approvalMode) {
+                Text(ApprovalMode.ask.label).tag(ApprovalMode?.none)
+                ForEach(ApprovalMode.allCases, id: \.self) { mode in
+                    Text(mode.label).tag(Optional(mode))
+                }
+            }
+            .help("Auto-approve runs file changes and commands without an approval card. Useful for trusted or scratch projects; the command allowlist still applies.")
+        } header: {
+            Text("Settings")
+        }
     }
 
     // MARK: - Command allowlist
