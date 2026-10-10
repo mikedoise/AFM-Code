@@ -241,7 +241,8 @@ final class SessionEngine {
         while true {
             attempt += 1
             let needsCompaction = await attemptTurn(prompt: prompt)
-            // The turn died on a full context window. Compress
+            // The turn died because the transcript is unusable (a
+            // full window, or content the model can't read). Compress
             // aggressively, then re-run the same prompt against the
             // rebuilt session — exactly once.
             guard needsCompaction, attempt == 1 else { break }
@@ -288,13 +289,19 @@ final class SessionEngine {
             state = .idle
             return false
         } catch {
-            // A full context window is the one turn failure we can
-            // recover from in place. Any other failure is terminal for
-            // the turn.
-            if let modelError = error as? LanguageModelError,
-               case .contextSizeExceeded = modelError {
-                Self.logger.info("turn failed: context size exceeded")
-                return true
+            // Two transcript failures we can recover from in place:
+            // a full context window, and saved content the current
+            // model can't read. Both are fixed the same way — rebuild
+            // the transcript (the compactor renders the entries as
+            // plain text, so a rebuilt session sidesteps the problem).
+            if let modelError = error as? LanguageModelError {
+                switch modelError {
+                case .contextSizeExceeded, .unsupportedTranscriptContent:
+                    Self.logger.info("turn failed: \(modelError); rebuilding the transcript")
+                    return true
+                default:
+                    break
+                }
             }
             handleTurnFailure(error)
             return false

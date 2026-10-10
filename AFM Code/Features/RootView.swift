@@ -27,9 +27,14 @@ struct RootView: View {
         }
         .task {
             workspaces.refreshAll(projects: projects)
+            chat.validateSelection(projects: projects, sessions: sessions)
         }
         .onChange(of: projects.map(\.id)) {
             workspaces.refreshAll(projects: projects)
+            chat.validateSelection(projects: projects, sessions: sessions)
+        }
+        .onChange(of: sessions.map(\.id)) {
+            chat.validateSelection(projects: projects, sessions: sessions)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {

@@ -16,9 +16,11 @@ struct SessionSidebarView: View {
     @Environment(WorkspaceStore.self) private var workspaces
     @Environment(ChatController.self) private var chat
 
-    @State private var expandedProjects: Set<UUID> = []
+    @State private var expandedProjects: Set<UUID> = Self.loadExpanded()
     @State private var renamingProject: Project?
     @State private var removingProject: Project?
+    @State private var renamingSession: ChatSession?
+    @State private var removingSession: ChatSession?
 
     private var generalSessions: [ChatSession] {
         sessions.filter { $0.project == nil }
@@ -29,8 +31,7 @@ struct SessionSidebarView: View {
             if !generalSessions.isEmpty {
                 Section("General") {
                     ForEach(generalSessions) { session in
-                        SessionRow(session: session)
-                            .tag(SidebarItem.session(session.id))
+                        sessionRow(session)
                     }
                 }
             }
@@ -54,6 +55,9 @@ struct SessionSidebarView: View {
                     .buttonStyle(.borderedProminent)
                 }
             }
+        }
+        .onChange(of: expandedProjects) { _, set in
+            UserDefaults.standard.set(set.map(\.uuidString), forKey: Self.expandedKey)
         }
         .navigationTitle("AFM Code")
         .toolbar {
@@ -89,12 +93,59 @@ struct SessionSidebarView: View {
         } message: {
             Text("Sessions in this project are removed from AFM Code. The folder itself is not touched.")
         }
+        .sheet(item: $renamingSession) { session in
+            RenameSheet(title: "Rename Session", initial: session.title) { name in
+                session.title = name
+                try? modelContext.save()
+            }
+        }
+        .confirmationDialog(
+            "Delete \(removingSession?.title ?? "this session")?",
+            isPresented: Binding(
+                get: { removingSession != nil },
+                set: { if !$0 { removingSession = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete Session", role: .destructive) {
+                if let session = removingSession {
+                    removeSession(session)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The conversation is removed from AFM Code. Nothing else is changed.")
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             ModelBadgeView()
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10)
                 .background(.bar)
         }
+    }
+
+    // MARK: - Session row
+
+    private func sessionRow(_ session: ChatSession) -> some View {
+        SessionRow(session: session)
+            .tag(SidebarItem.session(session.id))
+            .contextMenu {
+                Button("Rename…") {
+                    renamingSession = session
+                }
+                Button("Delete", role: .destructive) {
+                    removingSession = session
+                }
+            }
+    }
+
+    // MARK: - Expansion persistence
+
+    private static let expandedKey = "sidebar.expandedProjects"
+
+    private static func loadExpanded() -> Set<UUID> {
+        let raw = UserDefaults.standard.stringArray(forKey: expandedKey) ?? []
+        return Set(raw.compactMap { UUID(uuidString: $0) })
     }
 
     // MARK: - Project row
@@ -105,8 +156,7 @@ struct SessionSidebarView: View {
         DisclosureGroup(isExpanded: expansionBinding(for: project)) {
             let projectSessions = project.sessionList
             ForEach(projectSessions) { session in
-                SessionRow(session: session)
-                    .tag(SidebarItem.session(session.id))
+                sessionRow(session)
             }
             Button {
                 createSession(in: project)
@@ -175,6 +225,25 @@ struct SessionSidebarView: View {
         let session = ChatSession.create(in: project, context: modelContext)
         expandedProjects.insert(project.id)
         selection = .session(session.id)
+    }
+
+    private func removeSession(_ session: ChatSession) {
+        // Drop the engine and release the view first, then delete on
+        // the next runloop pass — live views and the engine hold
+        // references to the model object.
+        chat.dropEngine(for: session.id)
+        if let project = session.project {
+            var sessions = project.sessions ?? []
+            sessions.removeAll { $0.id == session.id }
+            project.sessions = sessions
+        }
+        if selection == .session(session.id) {
+            selection = nil
+        }
+        Task {
+            modelContext.delete(session)
+            try? modelContext.save()
+        }
     }
 
     private func removeProject(_ project: Project) {

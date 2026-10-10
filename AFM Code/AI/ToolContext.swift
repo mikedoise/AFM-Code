@@ -282,38 +282,46 @@ final class ToolContext {
 
     // MARK: - Diff previews (for pending write/edit steps)
 
-    func previewDiffForWrite(path: String, newContent: String) -> DiffData {
+    func previewDiffForWrite(path: String, newContent: String) async -> DiffData {
         let relative = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        let newLines = Array(newContent.components(separatedBy: "\n").prefix(4000))
-        let oldLines: [String]
-        if let existing = try? readFileContent(path: path) {
-            let lines = existing.components(separatedBy: "\n")
-            oldLines = Array(lines.prefix(4000))
-        } else {
-            oldLines = []
-        }
-        return LineDiff.compute(path: relative, old: oldLines, new: newLines)
+        // The file read stays on the main actor (under the
+        // security-scoped lease); the line split and LCS diff — the
+        // heavy part — run off it so the approval card appears fast.
+        let existing = (try? readFileContent(path: path)) ?? ""
+        return await Task.detached(priority: .userInitiated) {
+            let oldLines: [String]
+            if existing.isEmpty {
+                oldLines = []
+            } else {
+                oldLines = Array(existing.components(separatedBy: "\n").prefix(4000))
+            }
+            let newLines = Array(newContent.components(separatedBy: "\n").prefix(4000))
+            return LineDiff.compute(path: relative, old: oldLines, new: newLines)
+        }.value
     }
 
-    func previewDiffForEdit(path: String, find: String, replace: String, replaceAll: Bool) -> DiffData {
+    func previewDiffForEdit(path: String, find: String, replace: String, replaceAll: Bool) async -> DiffData {
         let relative = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        let oldLines: [String]
-        if let current = try? readFileContent(path: path) {
-            oldLines = Array(current.components(separatedBy: "\n").prefix(4000))
-        } else {
-            oldLines = []
-        }
-        let updated = oldLines.joined(separator: "\n").replacingOccurrences(of: find, with: replace)
-        let newLines = Array(updated.components(separatedBy: "\n").prefix(4000))
-        if oldLines == newLines {
-            return DiffData(
-                path: relative,
-                isNewFile: false,
-                lines: [DiffData.Line(kind: .context, text: "(no changes)")],
-                truncated: false
-            )
-        }
-        return LineDiff.compute(path: relative, old: oldLines, new: newLines)
+        let current = (try? readFileContent(path: path)) ?? ""
+        return await Task.detached(priority: .userInitiated) {
+            let oldLines: [String]
+            if current.isEmpty {
+                oldLines = []
+            } else {
+                oldLines = Array(current.components(separatedBy: "\n").prefix(4000))
+            }
+            let updated = oldLines.joined(separator: "\n").replacingOccurrences(of: find, with: replace)
+            let newLines = Array(updated.components(separatedBy: "\n").prefix(4000))
+            if oldLines == newLines {
+                return DiffData(
+                    path: relative,
+                    isNewFile: false,
+                    lines: [DiffData.Line(kind: .context, text: "(no changes)")],
+                    truncated: false
+                )
+            }
+            return LineDiff.compute(path: relative, old: oldLines, new: newLines)
+        }.value
     }
 
     // MARK: - Directory listing
@@ -439,12 +447,14 @@ final class ToolContext {
             command = "grep -rn --binary-files=no-match -- \(Self.shellQuote(pattern)) \(Self.shellQuote(searchPath))"
         }
 
+        let environment = await ShellEnvironment.resolved()
         let result = try await withLease {
             try await Self.runProcess(
                 arguments: ["-lc", command],
                 workingDirectory: root,
                 timeout: 15,
-                maxOutputBytes: 16 * 1024
+                maxOutputBytes: 16 * 1024,
+                environment: environment
             )
         }
         guard let run = result else { throw ToolError.folderUnavailable }
@@ -462,12 +472,14 @@ final class ToolContext {
         guard let root = rootURL else { throw ToolError.folderUnavailable }
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw ToolError.io("Empty command.") }
+        let environment = await ShellEnvironment.resolved()
         let run = try await withLease {
             try await Self.runProcess(
                 arguments: ["-lc", trimmed],
                 workingDirectory: root,
                 timeout: min(max(timeout, 1), 300),
-                maxOutputBytes: 16 * 1024
+                maxOutputBytes: 16 * 1024,
+                environment: environment
             )
         }
         guard let run else { throw ToolError.folderUnavailable }
@@ -510,16 +522,24 @@ final class ToolContext {
     }
 
     /// Run a shell command with a hard timeout and capped output.
+    ///
+    /// `environment` replaces the inherited app environment (a minimal
+    /// `launchd` PATH) with the user's real terminal environment, so
+    /// the user's tools — brew, uv, cargo, … — are on the PATH.
     nonisolated static func runProcess(
         arguments: [String],
         workingDirectory: URL,
         timeout: Double,
-        maxOutputBytes: Int
+        maxOutputBytes: Int,
+        environment: [String: String]? = nil
     ) async throws -> ProcessRun {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = arguments
         process.currentDirectoryURL = workingDirectory
+        if let environment {
+            process.environment = environment
+        }
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

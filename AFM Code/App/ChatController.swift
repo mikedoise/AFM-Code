@@ -16,9 +16,63 @@ enum SidebarItem: Hashable, Sendable {
 @MainActor
 @Observable
 final class ChatController {
-    var selection: SidebarItem?
+    /// The detail-pane selection, persisted so the last project or
+    /// session is selected again on relaunch.
+    var selection: SidebarItem? {
+        didSet { Self.saveSelection(selection, to: defaults) }
+    }
 
+    private let defaults: UserDefaults
     private var engines: [UUID: SessionEngine] = [:]
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        self.selection = Self.loadSelection(from: defaults)
+    }
+
+    private enum Keys {
+        static let selection = "controller.selection"
+    }
+
+    private static func saveSelection(_ selection: SidebarItem?, to defaults: UserDefaults) {
+        switch selection {
+        case .project(let id):
+            defaults.set("project:\(id.uuidString)", forKey: Keys.selection)
+        case .session(let id):
+            defaults.set("session:\(id.uuidString)", forKey: Keys.selection)
+        case nil:
+            defaults.removeObject(forKey: Keys.selection)
+        }
+    }
+
+    private static func loadSelection(from defaults: UserDefaults) -> SidebarItem? {
+        guard let raw = defaults.string(forKey: Keys.selection),
+              let separator = raw.firstIndex(of: ":") else { return nil }
+        let kind = String(raw[..<separator])
+        let idString = String(raw[raw.index(after: separator)...])
+        guard let id = UUID(uuidString: idString) else { return nil }
+        switch kind {
+        case "project": return .project(id)
+        case "session": return .session(id)
+        default: return nil
+        }
+    }
+
+    /// Clear the persisted selection when it no longer matches anything
+    /// (the item was removed, or the window's data changed).
+    func validateSelection(projects: [Project], sessions: [ChatSession]) {
+        guard let current = selection else { return }
+        let known: Bool
+        switch current {
+        case .project(let id):
+            known = projects.contains { $0.id == id }
+        case .session(let id):
+            known = sessions.contains { $0.id == id }
+        }
+        if !known {
+            selection = nil
+        }
+    }
 
     func engine(
         for session: ChatSession,

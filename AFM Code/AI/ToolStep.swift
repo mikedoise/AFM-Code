@@ -90,7 +90,9 @@ struct ToolStep: Identifiable, Codable, Equatable, Sendable {
 }
 
 /// A line-oriented diff preview attached to write/edit steps.
-struct DiffData: Codable, Equatable, Sendable {
+///
+/// `nonisolated` so the diff can be computed off the main actor.
+nonisolated struct DiffData: Codable, Equatable, Sendable {
     enum LineKind: String, Codable, Sendable {
         case context, addition, removal
     }
@@ -127,7 +129,10 @@ struct DiffData: Codable, Equatable, Sendable {
 ///
 /// For files whose line product is large we bail out to a whole-file
 /// "replace" preview instead of spending time on a full LCS.
-enum LineDiff {
+///
+/// `nonisolated` so the (potentially heavy) computation can run off
+/// the main actor while an approval card is being prepared.
+nonisolated enum LineDiff {
     static func compute(
         path: String,
         old: [String],

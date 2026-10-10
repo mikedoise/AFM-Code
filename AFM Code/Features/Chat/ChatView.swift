@@ -34,16 +34,33 @@ struct ChatView: View {
         .id(session.id)
     }
 
-    /// Per-session model selection. Phase 1 lists the detected
-    /// on-device variants (the OS decides which one a machine gets);
-    /// PCC joins this menu in Phase 4.
+    /// Per-session model selection: the OS decides which on-device
+    /// variant a machine gets, and the user can pin one (or back to
+    /// "best available").
     private var modelPicker: some View {
         Menu {
+            Button {
+                session.modelKind = nil
+            } label: {
+                let isSelected = session.modelKind == nil
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Image(systemName: isSelected ? "checkmark" : "circle")
+                        Text("Best available")
+                    }
+                    Text("Whichever model this Mac is offered")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+
             ForEach(catalog.descriptors) { descriptor in
                 Button {
                     session.modelKind = descriptor.kind
                 } label: {
-                    let isSelected = (engine?.activeModel ?? catalog.activeDescriptor)?.kind == descriptor.kind
+                    let isSelected = session.modelKind == descriptor.kind && descriptor.isAvailable
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Image(systemName: isSelected ? "checkmark" : (descriptor.isAvailable ? "circle" : "xmark"))
@@ -79,6 +96,9 @@ struct ChatView: View {
             }
         }
         .help("Model for this session")
+        .onChange(of: session.modelKindRaw) {
+            try? modelContext.save()
+        }
     }
 
     /// "tools · reasoning · vision" from the descriptor's capability
