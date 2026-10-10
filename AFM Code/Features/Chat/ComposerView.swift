@@ -10,6 +10,7 @@ struct ComposerView: View {
 
     @Environment(ModelCatalog.self) private var catalog
     @State private var draft = ""
+    @State private var prewarmTask: Task<Void, Never>?
     @FocusState private var isFocused: Bool
 
     private var model: ModelDescriptor? { engine?.activeModel ?? catalog.activeDescriptor }
@@ -86,6 +87,15 @@ struct ComposerView: View {
                     }
                     .font(.caption2)
                 }
+                if engine?.isCompacting == true {
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Compressing history…")
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Text("Return to send · Shift-Return for a new line")
                     .font(.caption2)
@@ -100,6 +110,19 @@ struct ComposerView: View {
         .onChange(of: isFocused) { _, focused in
             if focused {
                 engine?.prewarm()
+            }
+        }
+        .onChange(of: draft) { _, newValue in
+            // Prewarm once the user pauses typing, so the first token
+            // of the next turn arrives faster.
+            prewarmTask?.cancel()
+            guard !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            prewarmTask = Task {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled,
+                      engine?.isBusy != true,
+                      engine?.isCompacting != true else { return }
+                engine?.prewarm(draft: newValue)
             }
         }
     }

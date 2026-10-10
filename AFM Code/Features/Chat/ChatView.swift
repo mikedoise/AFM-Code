@@ -28,6 +28,7 @@ struct ChatView: View {
             if engine == nil {
                 engine = chat.engine(for: session, modelContext: modelContext, catalog: catalog, workspaces: workspaces)
             }
+            engine?.prewarm()
         }
         .id(session.id)
     }
@@ -42,12 +43,26 @@ struct ChatView: View {
                     session.modelKind = descriptor.kind
                 } label: {
                     let isSelected = (engine?.activeModel ?? catalog.activeDescriptor)?.kind == descriptor.kind
-                    if descriptor.isAvailable {
-                        Label(descriptor.displayName, systemImage: isSelected ? "checkmark" : "circle")
-                    } else if let detail = descriptor.availabilityDetail {
-                        Text(detail)
-                    } else {
-                        Label(descriptor.displayName, systemImage: "xmark")
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Image(systemName: isSelected ? "checkmark" : (descriptor.isAvailable ? "circle" : "xmark"))
+                            Text(descriptor.displayName)
+                        }
+                        if descriptor.isAvailable {
+                            let meta = [
+                                descriptor.contextSize.map { "\(ModelBadgeView.compact($0)) ctx" },
+                                Self.capabilitySummary(descriptor)
+                            ].compactMap { $0 }
+                            if !meta.isEmpty {
+                                Text(meta.joined(separator: " · "))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else if let detail = descriptor.availabilityDetail {
+                            Text(detail)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 .disabled(!descriptor.isAvailable)
@@ -63,5 +78,18 @@ struct ChatView: View {
             }
         }
         .help("Model for this session")
+    }
+
+    /// "tools · reasoning · vision" from the descriptor's capability
+    /// set, in a fixed order.
+    private static func capabilitySummary(_ descriptor: ModelDescriptor) -> String? {
+        let order = ["toolCalling", "reasoning", "vision"]
+        let labels: [String: String] = [
+            "toolCalling": "tools",
+            "reasoning": "reasoning",
+            "vision": "vision"
+        ]
+        let shown = order.filter { descriptor.capabilities.contains($0) }.compactMap { labels[$0] }
+        return shown.isEmpty ? nil : shown.joined(separator: " · ")
     }
 }

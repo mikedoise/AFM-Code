@@ -34,6 +34,10 @@ struct RootView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 workspaces.refreshAll(projects: projects)
+                // The on-device model is loaded on demand and its
+                // availability can change while backgrounded; re-probe
+                // on wake so badges and gauges stay truthful.
+                Task { await catalog.probe() }
             }
         }
     }

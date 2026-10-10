@@ -14,6 +14,11 @@ import SwiftData
 /// the tool runtime (`ToolContext` + `ToolApprovalService`). The coding
 /// tools ride inside the model session — the framework runs the
 /// tool-call loop; the tools do the work; approvals pause it.
+///
+/// Phase 4: transcripts that approach the model's context window are
+/// compacted — a tool-free summarization pass rewrites the older half
+/// (or all of it) so long sessions don't die at the window. Turns that
+/// fail on a full context are compacted and retried once.
 @MainActor
 @Observable
 final class SessionEngine {
@@ -42,6 +47,11 @@ final class SessionEngine {
     private var sendTask: Task<Void, Never>?
     /// Whether the model session was created with the coding tools.
     private var sessionHasTools = false
+    /// The tools the session was created with, so the session can be
+    /// rebuilt after compaction without changing its behavior.
+    private var sessionTools: [any Tool] = []
+    /// True while a compaction pass is summarizing history (sends pause).
+    private(set) var isCompacting = false
 
     init(
         session: ChatSession,
@@ -104,6 +114,7 @@ final class SessionEngine {
             ? CodingTools(context: toolContext!).tools
             : []
         sessionHasTools = !tools.isEmpty
+        sessionTools = tools
         let prompt = AgentInstructions.prompt(
             includesTools: !tools.isEmpty,
             project: Self.makeProjectInfo(toolContext: toolContext)
@@ -173,6 +184,18 @@ final class SessionEngine {
         languageModelSession?.prewarm()
     }
 
+    /// Prewarm with the user's draft so the first token of the next
+    /// turn arrives faster. Best-effort: the draft is treated as a
+    /// prefix of the prompt that will actually be sent.
+    func prewarm(draft: String) {
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            prewarm()
+            return
+        }
+        languageModelSession?.prewarm(promptPrefix: Prompt(trimmed))
+    }
+
     // MARK: - Sending
 
     func send(_ text: String) {
@@ -192,10 +215,9 @@ final class SessionEngine {
             return
         }
 
-        if sessionHasTools {
-            toolContext?.beginTurn()
-        }
-
+        // Set synchronously so a rapid double-send can't start a second
+        // turn; `attemptTurn` re-establishes both on the compaction
+        // retry.
         state = .responding
         streamingText = ""
         sendTask = Task { [weak self] in
@@ -208,7 +230,43 @@ final class SessionEngine {
     }
 
     private func runTurn(prompt: String) async {
-        guard let languageModelSession else { return }
+        guard languageModelSession != nil else { return }
+
+        var attempt = 0
+        while true {
+            attempt += 1
+            let needsCompaction = await attemptTurn(prompt: prompt)
+            // The turn died on a full context window. Compress
+            // aggressively, then re-run the same prompt against the
+            // rebuilt session — exactly once.
+            guard needsCompaction, attempt == 1 else { break }
+            guard await compactHistory(keepRecentTurn: false) else { break }
+        }
+
+        if sessionHasTools {
+            toolContext?.endTurn()
+        }
+        streamingText = ""
+        // Compact before persisting, so the saved transcript matches
+        // what the session actually continues from. Not after a
+        // cancellation — the user asked for it to stop.
+        if !Task.isCancelled {
+            await maybeCompact()
+        }
+        await persistTranscript()
+        await refreshContextUsage()
+    }
+
+    /// Runs one model response for `prompt` and reports whether it
+    /// failed with a context-size error that a compaction pass could
+    /// fix (the caller may then compact and retry).
+    private func attemptTurn(prompt: String) async -> Bool {
+        guard let languageModelSession else { return false }
+        if sessionHasTools {
+            toolContext?.beginTurn()
+        }
+        state = .responding
+        streamingText = ""
 
         var options = GenerationOptions()
         if sessionHasTools {
@@ -223,15 +281,19 @@ final class SessionEngine {
             let response = try await stream.collect()
             finalizeAssistantResponse(response)
             state = .idle
+            return false
         } catch {
+            // A full context window is the one turn failure we can
+            // recover from in place. Any other failure is terminal for
+            // the turn.
+            if let modelError = error as? LanguageModelError,
+               case .contextSizeExceeded = modelError {
+                Self.logger.info("turn failed: context size exceeded")
+                return true
+            }
             handleTurnFailure(error)
+            return false
         }
-        if sessionHasTools {
-            toolContext?.endTurn()
-        }
-        streamingText = ""
-        await persistTranscript()
-        refreshContextUsage()
     }
 
     private func handleTurnFailure(_ error: any Error) {
@@ -321,20 +383,264 @@ final class SessionEngine {
     // MARK: - Context budgeting
 
     /// Measure the transcript against the model's context window.
-    private func refreshContextUsage() {
+    private func refreshContextUsage() async {
         guard let languageModelSession else { return }
         let model = SystemLanguageModel.default
         guard model.isAvailable else { return }
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let used = try await model.tokenCount(for: languageModelSession.transcript)
-                self.contextTokenCount = used
-                self.session.lastTokenCount = used
-            } catch {
-                self.contextTokenCount = nil
+        do {
+            let used = try await model.tokenCount(for: languageModelSession.transcript)
+            contextTokenCount = used
+            session.lastTokenCount = used
+        } catch {
+            contextTokenCount = nil
+        }
+    }
+
+    /// After a turn, keep the transcript well inside the model's
+    /// window: at 80% of context, summarize the older half, and if
+    /// that still leaves it above 90%, compress everything.
+    private func maybeCompact() async {
+        guard !isCompacting else { return }
+        let model = SystemLanguageModel.default
+        guard model.isAvailable else { return }
+        let size = model.contextSize
+        guard size > 0 else { return }
+
+        var used = contextTokenCount
+        if used == nil {
+            await refreshContextUsage()
+            used = contextTokenCount
+        }
+        guard let used, used >= size * 4 / 5 else { return }
+
+        guard await compactHistory(keepRecentTurn: true) else { return }
+        await refreshContextUsage()
+
+        if let used = contextTokenCount, used >= size * 9 / 10 {
+            await compactHistory(keepRecentTurn: false)
+            await refreshContextUsage()
+        }
+    }
+
+    /// Summarize the transcript's older half with a fresh tool-free
+    /// session and rebuild the model session around the summary. Keeps
+    /// the most recent turn verbatim when `keepRecentTurn` is set.
+    /// Returns true when the session was rebuilt.
+    @discardableResult
+    private func compactHistory(keepRecentTurn: Bool) async -> Bool {
+        guard let modelSession = languageModelSession, !modelSession.isResponding, !isCompacting else {
+            return false
+        }
+        let model = SystemLanguageModel.default
+        guard model.isAvailable else { return false }
+
+        isCompacting = true
+        defer { isCompacting = false }
+
+        let entries = Array(modelSession.transcript)
+        guard entries.count > 3 else { return false }
+
+        // Where the summarizable history ends and the kept tail begins:
+        // before the most recent user prompt, or never (compress all).
+        let splitIndex: Int
+        if keepRecentTurn,
+           let promptIndex = entries.lastIndex(where: { if case .prompt = $0 { return true }; return false }) {
+            splitIndex = promptIndex
+        } else {
+            splitIndex = entries.count
+        }
+        let oldEntries = Array(entries[entries.startIndex..<splitIndex])
+        guard !oldEntries.isEmpty else { return false }
+
+        // Not enough history to be worth a summarization round trip.
+        guard let oldTokens = try? await model.tokenCount(for: oldEntries),
+              oldTokens >= 1024 else {
+            return false
+        }
+
+        // A disposable, tool-free session on the same model does the
+        // summarizing; it never touches the live transcript.
+        let instructions = Instructions(Self.compactorInstructions)
+        let summarizer = LanguageModelSession(model: model, tools: [], instructions: instructions)
+        var options = GenerationOptions()
+        options.maximumResponseTokens = 1200
+
+        do {
+            let stream = summarizer.streamResponse(
+                to: Prompt(Self.renderConversation(oldEntries)),
+                options: options
+            )
+            let response = try await stream.collect()
+            let summary = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !summary.isEmpty else { return false }
+            rebuildSession(entries: entries, from: splitIndex, summary: summary, model: model)
+            Self.logger.info("compacted \(entries.count) transcript entries into a summary")
+            return true
+        } catch {
+            Self.logger.error("compaction failed; keeping the full transcript: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Replace the model session with one whose transcript is
+    /// [fresh instructions, compressed summary, kept tail], so the
+    /// agent continues from the summary but still sees the current
+    /// project context and its most recent turn verbatim.
+    private func rebuildSession(
+        entries: [Transcript.Entry],
+        from splitIndex: Int,
+        summary: String,
+        model: SystemLanguageModel
+    ) {
+        let prompt = AgentInstructions.prompt(
+            includesTools: sessionHasTools,
+            project: Self.makeProjectInfo(toolContext: toolContext)
+        )
+        var newEntries: [Transcript.Entry] = [
+            Self.makeInstructionsEntry(prompt: prompt, tools: sessionHasTools ? sessionTools : [])
+        ]
+        let summaryEntry = Transcript.Response(
+            assetIDs: [],
+            segments: [
+                Transcript.Segment.text(
+                    Transcript.TextSegment(content: "Earlier conversation (compressed):\n\(summary)")
+                )
+            ]
+        )
+        newEntries.append(.response(summaryEntry))
+        if splitIndex < entries.count {
+            newEntries.append(contentsOf: entries[splitIndex...])
+        }
+
+        var transcript = Transcript()
+        transcript.append(contentsOf: newEntries)
+
+        let newSession = LanguageModelSession(
+            model: model,
+            tools: sessionHasTools ? sessionTools : [],
+            transcript: transcript
+        )
+        newSession.transcriptErrorHandlingPolicy = .revertTranscript
+        languageModelSession = newSession
+        newSession.prewarm()
+    }
+
+    /// The summarizer's system prompt: a "memory compressor".
+    static let compactorInstructions = """
+    You are a memory compressor for a coding-agent conversation.
+    Rewrite the earlier conversation below as a compact, self-contained summary that the agent can continue from without seeing the original messages.
+
+    Preserve, in order of the original conversation:
+    1. Every user request, with specifics (file paths, names, commands, constraints).
+    2. Every file created, modified, or deleted, with its path and what changed.
+    3. Every command run, with its outcome (success, key errors, key output).
+    4. Approval decisions: which changes or commands the user approved, always-allowed, or denied.
+    5. Current state: what is done, what is in progress, what is blocked, and the next step.
+    6. User preferences or corrections the agent should keep honoring.
+
+    Rules:
+    - Plain prose and bullet points; no file contents, no command output dumps.
+    - Under 600 words.
+    - Output only the summary.
+    """
+
+    // MARK: - Transcript rendering (for the compactor)
+
+    /// Render transcript entries for the compactor, newest first, under
+    /// a total character budget so the summary request stays small.
+    private static func renderConversation(_ entries: [Transcript.Entry]) -> String {
+        var rendered = ""
+        var budget = 16_000
+        for entry in entries.reversed() {
+            guard let piece = renderEntry(entry) else { continue }
+            let capped = String(piece.prefix(budget))
+            rendered = capped + "\n\n" + rendered
+            budget -= capped.count
+            guard budget > 0 else { break }
+        }
+        return rendered
+    }
+
+    /// One transcript entry as plain text the summarizer can read.
+    private static func renderEntry(_ entry: Transcript.Entry) -> String? {
+        switch entry {
+        case .instructions:
+            // Stable content; rebuilt on resume and on compaction.
+            return nil
+        case .prompt(let prompt):
+            return "USER: \(Self.segmentText(prompt.segments))"
+        case .response(let response):
+            return "ASSISTANT: \(Self.segmentText(response.segments))"
+        case .reasoning(let reasoning):
+            let text = Self.segmentText(reasoning.segments)
+            return text.isEmpty ? nil : "AGENT THINKING: \(text)"
+        case .toolCalls(let calls):
+            let items = calls.map { call in
+                "\(call.toolName)(\(Self.summarizeArguments(call.arguments.jsonString)))"
+            }
+            guard !items.isEmpty else { return nil }
+            return String(("TOOL CALLS: " + items.joined(separator: "\n")).prefix(2_000))
+        case .toolOutput(let output):
+            return "TOOL RESULT (\(output.toolName)): \(Self.segmentText(output.segments, cap: 1_200))"
+        @unknown default:
+            return nil
+        }
+    }
+
+    /// Flatten a segment list to text, capped.
+    private static func segmentText(_ segments: [Transcript.Segment], cap: Int = 2_000) -> String {
+        var text = ""
+        for segment in segments {
+            switch segment {
+            case .text(let textSegment):
+                text += textSegment.content
+            case .structure(let structured):
+                text += structured.content.jsonString
+            case .attachment(let attachment):
+                text += attachment.label ?? "[attachment]"
+            @unknown default:
+                break
             }
         }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        guard trimmed.count > cap else { return trimmed }
+        return String(trimmed.prefix(cap)) + " …(truncated)"
+    }
+
+    /// Tool-call arguments as JSON, with long string values trimmed so
+    /// file contents can't drown the summary while paths stay visible.
+    private static func summarizeArguments(_ jsonString: String) -> String {
+        guard let data = jsonString.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else {
+            return String(jsonString.prefix(400))
+        }
+        func render(_ value: Any, depth: Int) -> String {
+            guard depth <= 2 else { return "…" }
+            switch value {
+            case let string as String:
+                let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.count > 200 {
+                    return "\(String(trimmed.prefix(120)))…(truncated, \(trimmed.count) chars)"
+                }
+                return string
+            case let dictionary as [String: Any]:
+                let pairs = dictionary.sorted { $0.key < $1.key }.map { key, value in
+                    "\"\(key)\": \(render(value, depth: depth + 1))"
+                }
+                return "{" + pairs.joined(separator: ", ") + "}"
+            case let array as [Any]:
+                let items = array.prefix(5).map { render($0, depth: depth + 1) }
+                return "[" + items.joined(separator: ", ") + (array.count > 5 ? ", …" : "") + "]"
+            case let number as NSNumber:
+                return number.stringValue
+            case is NSNull:
+                return "null"
+            default:
+                return "\(value)"
+            }
+        }
+        return String(render(object, depth: 0).prefix(1_500))
     }
 
     // MARK: - Error description
