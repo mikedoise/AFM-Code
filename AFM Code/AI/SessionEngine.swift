@@ -104,12 +104,16 @@ final class SessionEngine {
             ? CodingTools(context: toolContext!).tools
             : []
         sessionHasTools = !tools.isEmpty
+        let prompt = AgentInstructions.prompt(
+            includesTools: !tools.isEmpty,
+            project: Self.makeProjectInfo(toolContext: toolContext)
+        )
 
         if let data = session.transcriptData,
            var transcript = try? JSONDecoder().decode(Transcript.self, from: data) {
             // Refresh the instructions entry so the model always sees
-            // the current prompt and tool definitions.
-            let instructionsEntry = Self.makeInstructionsEntry(tools: tools)
+            // the current prompt, project context, and tool definitions.
+            let instructionsEntry = Self.makeInstructionsEntry(prompt: prompt, tools: tools)
             if let first = transcript.first, case .instructions = first {
                 transcript[0] = instructionsEntry
             } else {
@@ -122,17 +126,39 @@ final class SessionEngine {
             )
         } else {
             languageModelSession = LanguageModelSession(model: model, tools: tools) {
-                AgentInstructions.prompt(includesTools: !tools.isEmpty)
+                prompt
             }
         }
         languageModelSession?.transcriptErrorHandlingPolicy = .revertTranscript
         prewarm()
     }
 
+    /// What the model should know about the project it's working in:
+    /// name, folder path, current structure, and a README excerpt.
+    /// Best-effort — each piece is skipped if it can't be read.
+    private static func makeProjectInfo(toolContext: ToolContext?) -> AgentInstructions.ProjectInfo? {
+        guard let toolContext else { return nil }
+        let project = toolContext.session.project
+        var info = AgentInstructions.ProjectInfo(
+            name: project?.name ?? "Untitled Project",
+            rootPath: toolContext.rootURL?.path ?? project?.folderName ?? "",
+            structure: nil,
+            readme: nil
+        )
+        info.structure = try? toolContext.listDirectory(path: ".", maxDepth: 2)
+        for candidate in ["README.md", "README", "README.rst", "readme.md", "README.txt"] {
+            if let text = try? toolContext.readFileContent(path: candidate, maxLines: 60) {
+                info.readme = text
+                break
+            }
+        }
+        return info
+    }
+
     /// Rebuild the instructions transcript entry with the current
     /// prompt and tool definitions.
-    private static func makeInstructionsEntry(tools: [any Tool]) -> Transcript.Entry {
-        let text = Transcript.TextSegment(content: AgentInstructions.prompt(includesTools: !tools.isEmpty))
+    private static func makeInstructionsEntry(prompt: String, tools: [any Tool]) -> Transcript.Entry {
+        let text = Transcript.TextSegment(content: prompt)
         let definitions = tools.map { Transcript.ToolDefinition(tool: $0) }
         let instructions = Transcript.Instructions(
             id: UUID().uuidString,
@@ -236,11 +262,24 @@ final class SessionEngine {
 
     // MARK: - Persistence
 
+    /// Link a message to this session on *both* sides of the
+    /// relationship and register it. The optional-append form
+    /// (`session.messages?.append`) silently no-ops when the
+    /// relationship hasn't materialized — we can't afford that.
+    private func attach(_ message: Message) {
+        modelContext.insert(message)
+        message.session = session
+        var messages = session.messages ?? []
+        if !messages.contains(message) {
+            messages.append(message)
+        }
+        session.messages = messages
+        session.lastMessageAt = Date()
+    }
+
     private func persistUserMessage(_ text: String) {
         let message = Message(role: .user, content: text)
-        modelContext.insert(message)
-        session.messages?.append(message)
-        session.lastMessageAt = Date()
+        attach(message)
         session.setInitialTitle(from: text)
         try? modelContext.save()
     }
@@ -253,8 +292,7 @@ final class SessionEngine {
         message.tokenCount = response.usage.totalTokenCount
         lastResponseTokens = response.usage.totalTokenCount
         message.toolActivity = steps.isEmpty ? nil : steps
-        modelContext.insert(message)
-        session.messages?.append(message)
+        attach(message)
     }
 
     /// Keep whatever partial text and tool activity the user saw before
@@ -265,8 +303,7 @@ final class SessionEngine {
         guard !text.isEmpty || !steps.isEmpty else { return }
         let message = Message(role: .assistant, content: text)
         message.toolActivity = steps.isEmpty ? nil : steps
-        modelContext.insert(message)
-        session.messages?.append(message)
+        attach(message)
     }
 
     /// Re-encode the framework transcript (which now includes the new

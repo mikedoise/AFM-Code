@@ -172,10 +172,7 @@ struct SessionSidebarView: View {
     }
 
     private func createSession(in project: Project) {
-        let session = ChatSession(project: project)
-        modelContext.insert(session)
-        project.lastOpenedAt = Date()
-        try? modelContext.save()
+        let session = ChatSession.create(in: project, context: modelContext)
         expandedProjects.insert(project.id)
         selection = .session(session.id)
     }

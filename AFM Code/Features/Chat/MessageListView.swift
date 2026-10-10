@@ -48,18 +48,20 @@ struct MessageListView: View {
                 .frame(maxWidth: .infinity)
             }
             .defaultScrollAnchor(.bottom)
-            .onChange(of: engine?.streamingText) {
-                if let engine, engine.isBusy {
-                    withAnimation(.linear(duration: 0.1)) {
-                        proxy.scrollTo(Self.streamAnchor(session), anchor: .bottom)
-                    }
+            // Stream snapshots can arrive many times per frame, so a
+            // plain onChange would fire the scroll repeatedly in one
+            // frame. .task(id:) restarts on every change and the sleep
+            // coalesces each burst into a single scroll.
+            .task(id: engine?.streamingText) {
+                try? await Task.sleep(for: .milliseconds(50))
+                withAnimation(.linear(duration: 0.1)) {
+                    proxy.scrollTo(Self.streamAnchor(session), anchor: .bottom)
                 }
             }
-            .onChange(of: engine?.toolSteps.count) {
-                if let engine, engine.isBusy {
-                    withAnimation(.linear(duration: 0.1)) {
-                        proxy.scrollTo(Self.streamAnchor(session), anchor: .bottom)
-                    }
+            .task(id: engine?.toolSteps.count) {
+                try? await Task.sleep(for: .milliseconds(50))
+                withAnimation(.linear(duration: 0.1)) {
+                    proxy.scrollTo(Self.streamAnchor(session), anchor: .bottom)
                 }
             }
             .onChange(of: session.lastMessageAt) {

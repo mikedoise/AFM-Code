@@ -7,6 +7,17 @@ import Foundation
 /// Keep the default token-light — instructions count against the
 /// session's context window on every request.
 enum AgentInstructions {
+    /// What the model should know about the project it's working in.
+    /// Built at session creation and refreshed on resume.
+    struct ProjectInfo: Equatable, Sendable {
+        var name: String
+        var rootPath: String
+        /// Directory listing (depth-limited) of the project root.
+        var structure: String?
+        /// A short README excerpt, when one exists.
+        var readme: String?
+    }
+
     static let defaultSystemPrompt = """
     You are AFM Code, an expert software engineering agent running entirely on this Mac with Apple's on-device Foundation Models.
 
@@ -37,6 +48,7 @@ enum AgentInstructions {
 
     Working rules:
     - Explore before editing: read the files you intend to change.
+    - When asked what a project or module does, answer from what you actually read (start with the README and the structure below), not from assumptions.
     - File writes, edits, and commands are shown to the user for approval before they take effect.
     - If the user declines a change or command, do NOT retry the same thing. Acknowledge the decline and ask how they'd like to proceed.
     - If a command fails, read its output, fix the root cause, and re-run it. After a few genuine attempts, stop and report what failed.
@@ -48,10 +60,29 @@ enum AgentInstructions {
     You have no file or shell tools in this session. If you need code, logs, or output that you can't see, ask the user to paste it before asserting specifics.
     """
 
+    private static func projectSection(_ project: ProjectInfo) -> String {
+        var section = """
+        Project: \(project.name)
+        Project folder: \(project.rootPath) (the root for all file paths)
+        """
+        if let structure = project.structure, !structure.isEmpty {
+            section += "\nCurrent structure:\n\(structure)\n"
+        }
+        if let readme = project.readme, !readme.isEmpty {
+            section += "\nREADME excerpt:\n\(readme)\n"
+        }
+        return section
+    }
+
     /// The prompt actually given to the model. The tools section is
     /// only included when the session was created with tools — the
     /// model must never be told about tools it doesn't have.
-    static func prompt(includesTools: Bool) -> String {
-        defaultSystemPrompt + (includesTools ? toolsSection : noToolsSection)
+    static func prompt(includesTools: Bool, project: ProjectInfo? = nil) -> String {
+        var prompt = defaultSystemPrompt
+        if let project {
+            prompt += "\n" + projectSection(project)
+        }
+        prompt += includesTools ? toolsSection : noToolsSection
+        return prompt
     }
 }

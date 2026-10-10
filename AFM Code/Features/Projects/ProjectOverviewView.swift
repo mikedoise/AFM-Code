@@ -213,10 +213,7 @@ struct ProjectOverviewView: View {
     // MARK: - Actions
 
     private func createSession() {
-        let session = ChatSession(project: project)
-        modelContext.insert(session)
-        project.lastOpenedAt = Date()
-        try? modelContext.save()
+        let session = ChatSession.create(in: project, context: modelContext)
         chat.selection = .session(session.id)
     }
 }

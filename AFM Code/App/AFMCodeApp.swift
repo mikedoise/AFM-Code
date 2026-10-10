@@ -56,10 +56,7 @@ struct NewSessionCommands: Commands {
         let context = ModelContainerProvider.container.mainContext
         let predicate = #Predicate<Project> { $0.id == projectID }
         guard let project = try? context.fetch(FetchDescriptor(predicate: predicate)), let project = project.first else { return }
-        let session = ChatSession(project: project)
-        context.insert(session)
-        project.lastOpenedAt = Date()
-        try? context.save()
+        let session = ChatSession.create(in: project, context: context)
         chat.selection = .session(session.id)
     }
 }
