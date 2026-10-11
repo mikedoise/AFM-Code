@@ -5,14 +5,16 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(ModelCatalog.self) private var catalog
+    @State private var showModels = false
 
     var body: some View {
         Form {
             promptSection
             modelSection
+            mlxSection
         }
         .formStyle(.grouped)
-        .frame(width: 700, height: 580)
+        .frame(width: 700, height: 620)
     }
 
     // MARK: - System prompt
@@ -70,6 +72,27 @@ struct SettingsView: View {
             Text("Model")
         } footer: {
             Text("The operating system decides which on-device model this Mac gets; AFM Code reports it but can't change it. Models are selected per session from the chat toolbar.")
+        }
+    }
+
+    // MARK: - MLX models
+
+    private var mlxSection: some View {
+        Section {
+            Button {
+                showModels = true
+            } label: {
+                Label("Manage MLX Models…", systemImage: "square.stack.3d.up")
+            }
+            .help("Search the Hugging Face Hub and download models to run locally via MLX.")
+        } header: {
+            Text("MLX Models")
+        } footer: {
+            Text("Run your own models from the Hugging Face Hub on Apple Silicon. Downloaded weights are stored in AFM Code's container, and models support the same tools, approvals, and context handling as the on-device model.")
+        }
+        .sheet(isPresented: $showModels) {
+            ModelsView()
+                .frame(width: 680, height: 640)
         }
     }
 }

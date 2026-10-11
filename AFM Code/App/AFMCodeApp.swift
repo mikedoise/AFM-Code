@@ -7,6 +7,9 @@ struct AFMCodeApp: App {
     @State private var chat = ChatController()
     @State private var workspaces = WorkspaceStore()
     @State private var settings = AppSettings()
+    @State private var mlx = MLXModelManager(
+        modelContext: ModelContainerProvider.container.mainContext
+    )
 
     var body: some Scene {
         WindowGroup {
@@ -15,6 +18,7 @@ struct AFMCodeApp: App {
                 .environment(chat)
                 .environment(workspaces)
                 .environment(settings)
+                .environment(mlx)
                 .modelContainer(ModelContainerProvider.container)
                 .frame(minWidth: 860, minHeight: 540)
                 .focusedSceneValue(\.afmChat, chat)
@@ -30,6 +34,7 @@ struct AFMCodeApp: App {
             SettingsView()
                 .environment(catalog)
                 .environment(settings)
+                .environment(mlx)
         }
     }
 }
