@@ -79,7 +79,8 @@ enum AgentInstructions {
     - write_file: create a file, or fully replace one.
     - edit_file: change part of a file; the search text must match exactly (once, or use replaceAll).
     - list_directory: browse folders.
-    - search: find text across the project.
+    - search: find text across the project's current file contents (not commit history).
+    - git: query the project's git repository (read-only) — commit history, blame, diffs, status.
     - run_command: run shell commands (builds, tests, git) in the project folder.
 
     Working rules:
@@ -102,8 +103,9 @@ enum AgentInstructions {
     private static let gitSection = """
 
     The project folder is a checked-out Git repository. It is already on this machine — never clone it to inspect it.
-    - Inspect state: git status, git diff, git branch -a, git remote -v, git log --oneline -20.
-    - Explore history: git show <sha>, git diff <sha>~1..<sha>, git log -S<symbol> --oneline, git log --oneline -- <path>.
+    - Use the git tool for anything about history or state: log finds commits (by message text, code pickaxe, or path), blame shows who/when a file or line region last changed, show reveals what a commit changed, diff shows uncommitted changes, status and branch show the current state.
+    - search only finds text in current file contents — it cannot see commit history. For "when", "who", or "which commit" questions, use the git tool, not search.
+    - Use run_command only for git *writes* (add, commit, push) when the user asks.
     - Read each output before deciding the next step.
     """
 

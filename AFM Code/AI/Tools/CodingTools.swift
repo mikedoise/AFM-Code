@@ -15,6 +15,7 @@ struct CodingTools {
             EditFileTool(context: context),
             ListDirectoryTool(context: context),
             SearchTool(context: context),
+            GitTool(context: context),
             RunCommandTool(context: context)
         ]
     }

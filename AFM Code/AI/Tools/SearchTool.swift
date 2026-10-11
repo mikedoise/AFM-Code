@@ -8,7 +8,7 @@ nonisolated struct SearchTool: Tool {
     let context: ToolContext
 
     let name = "search"
-    let description = "Search file contents across the project for a text pattern (substring, or regular expression when ripgrep is available). Returns matching lines as \"path:line:content\". Use it to find where something is defined or used."
+    let description = "Search file contents across the project for a text pattern (substring, or regular expression when ripgrep is available). Returns matching lines as \"path:line:content\". Use it to find where something is defined or used. It sees current file contents only — use the git tool for commit history."
 
     @Generable
     struct Arguments {
