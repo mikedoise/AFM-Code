@@ -115,7 +115,7 @@ final class MLXModelManager {
         )
         if let config = result?.config {
             model.modelType = Self.stringValue(config["model_type"])
-            model.maxContextTokens = Self.intValue(config["max_position_embeddings"])
+            model.maxContextTokens = Self.maxContextTokens(in: config)
             model.setCapabilities(Self.inferCapabilities(
                 modelType: model.modelType,
                 chatTemplate: Self.stringValue(config["chat_template_jinja"]),
@@ -262,17 +262,8 @@ final class MLXModelManager {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
-        let value: Int?
-        if let number = object["max_position_embeddings"] as? Int {
-            value = number
-        } else if let double = object["max_position_embeddings"] as? Double {
-            value = Int(double)
-        } else if let string = object["max_position_embeddings"] as? String, let parsed = Int(string) {
-            value = parsed
-        } else {
-            value = nil
-        }
-        if let value, value > 0 {
+        let value = Self.maxContextTokens(in: object)
+        if let value {
             model.maxContextTokens = value
             try? modelContext.save()
             Self.logger.info("noted context window for \(model.repoID): \(value) tokens")
@@ -337,6 +328,50 @@ final class MLXModelManager {
 
     static func stringValue(_ value: HuggingFace.Value?) -> String? {
         if case .some(.string(let string)) = value { return string }
+        return nil
+    }
+
+    /// The model's context window from its `config.json` (or the Hub's
+    /// `?config=true` metadata).
+    ///
+    /// VLM layouts (Gemma4 and kin) nest the text model's config under
+    /// `text_config`, where `max_position_embeddings` lives; the
+    /// top-level key is absent, so both places are checked. Note this is
+    /// the model's *theoretical* RoPE ceiling — the inference runtime may
+    /// register a smaller window, and the session engine corrects downward
+    /// from what it observes.
+    static func maxContextTokens(in object: [String: Any]) -> Int? {
+        func asInt(_ value: Any?) -> Int? {
+            if let number = value as? Int { return number }
+            if let number = value as? Double { return Int(number) }
+            if let string = value as? String, let parsed = Int(string) { return parsed }
+            return nil
+        }
+        if let value = asInt(object["max_position_embeddings"]), value > 0 { return value }
+        if let nested = object["text_config"] as? [String: Any],
+           let value = asInt(nested["max_position_embeddings"]), value > 0 {
+            return value
+        }
+        return nil
+    }
+
+    /// The `HuggingFace.Value`-tree twin of the lookup above, for Hub metadata.
+    static func maxContextTokens(in config: [String: HuggingFace.Value]) -> Int? {
+        func asInt(_ value: HuggingFace.Value?) -> Int? {
+            switch value {
+            case .some(.int(let int)):
+                return int
+            case .some(.double(let double)):
+                return Int(double)
+            default:
+                return nil
+            }
+        }
+        if let value = asInt(config["max_position_embeddings"]), value > 0 { return value }
+        if case .some(.object(let nested)) = config["text_config"],
+           let value = asInt(nested["max_position_embeddings"]), value > 0 {
+            return value
+        }
         return nil
     }
 

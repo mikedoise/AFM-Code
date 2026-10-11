@@ -233,6 +233,13 @@ final class SessionEngine {
         }
         languageModelSession?.transcriptErrorHandlingPolicy = .revertTranscript
         prewarm()
+
+        // Measure the baseline (system prompt, instructions, restored
+        // transcript) so the context gauge shows the session's starting
+        // usage instead of waiting for the first turn to complete.
+        Task { [weak self] in
+            await self?.refreshContextUsage()
+        }
     }
 
     /// What the model should know about the project it's working in:
@@ -794,6 +801,17 @@ final class SessionEngine {
         let advertised = activeModel?.contextSize ?? 0
         effectiveContextSize = window
         Self.logger.info("noted runtime context window: \(window) tokens (advertised \(advertised))")
+        if case .mlx(let mlxModel) = modelSource,
+           let stored = mlxModel.maxContextTokens, window < stored {
+            // Persist the correction — only ever downward — so the next
+            // session, the picker badge, and compaction all start from
+            // the window that actually works rather than the advertised
+            // ceiling the runtime refuses to honor.
+            mlxModel.maxContextTokens = window
+            try? modelContext.save()
+            Self.logger.info("persisted observed window \(window) for \(mlxModel.repoID) (was \(stored))")
+            Task { await catalog.refreshMlxModels() }
+        }
     }
 
     // MARK: - Transcript rendering (for the compactor)

@@ -78,14 +78,32 @@ struct ComposerView: View {
 
             HStack(spacing: 10) {
                 ModelBadgeView()
-                if let used = engine?.contextTokenCount, let size = engine?.contextSize, size > 0 {
-                    HStack(spacing: 4) {
+                if let size = engine?.contextSize, size > 0 {
+                    let used = engine?.contextTokenCount
+                    let ratio = used.map { min(Double($0) / Double(size), 1.0) } ?? 0
+                    HStack(spacing: 5) {
                         Image(systemName: "gauge.medium")
                             .foregroundStyle(contextColor(used: used, size: size))
-                        Text("\(ModelBadgeView.compact(used)) / \(ModelBadgeView.compact(size)) tokens")
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(.quaternary)
+                            .overlay(alignment: .leading) {
+                                GeometryReader { proxy in
+                                    Rectangle()
+                                        .fill(contextColor(used: used, size: size))
+                                        .frame(width: max(0, proxy.size.width * ratio))
+                                }
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 2))
+                            .frame(width: 56, height: 5)
+                            .opacity(used == nil ? 0.35 : 1)
+                        Text(used.map { "\(ModelBadgeView.compact($0)) / \(ModelBadgeView.compact(size)) tokens" }
+                             ?? "\(ModelBadgeView.compact(size)) token window")
                             .foregroundStyle(.secondary)
                     }
                     .font(.caption2)
+                    .help(used == nil
+                          ? "The model's context window. Usage is counted once the transcript is measured."
+                          : "Context used by this session against the model's window. Older history compresses automatically as it fills.")
                 }
                 if engine?.isCompacting == true {
                     HStack(spacing: 4) {
@@ -133,10 +151,10 @@ struct ComposerView: View {
         engine?.send(text)
     }
 
-    private func contextColor(used: Int, size: Int) -> Color {
-        let ratio = Double(used) / Double(size)
+    private func contextColor(used: Int?, size: Int) -> Color {
+        let ratio = used.map { Double($0) / Double(size) } ?? 0
         if ratio > 0.9 { return .red }
         if ratio > 0.7 { return .orange }
-        return .secondary
+        return used == nil ? Color.secondary.opacity(0.45) : .secondary
     }
 }
