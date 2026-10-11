@@ -9,8 +9,12 @@ final class ChatSession {
     var createdAt: Date
     var lastMessageAt: Date
     /// `ModelDescriptor.Kind.rawValue` selected for this session.
-    /// `nil` means "best available on-device model".
+    /// `nil` means "best available" (the on-device model, or the
+    /// first ready MLX model).
     var modelKindRaw: String?
+    /// The MLX model's Hugging Face repository id, when
+    /// `modelKindRaw` is `"mlx"`.
+    var mlxModelID: String?
     /// JSON-encoded `FoundationModels.Transcript`, used to resume the
     /// model session with its full prior history (prompts, responses,
     /// and — from Phase 3 onward — tool calls/outputs).

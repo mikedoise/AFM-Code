@@ -179,10 +179,10 @@ struct ProjectOverviewView: View {
     @ViewBuilder
     private var settingsSection: some View {
         Section {
-            Picker("Model", selection: modelKindBinding) {
-                Text("Best available").tag(ModelDescriptor.Kind?.none)
-                ForEach(modelKindOptions, id: \.self) { kind in
-                    Text(kindLabel(for: kind)).tag(Optional(kind))
+            Picker("Model", selection: modelSelectionBinding) {
+                Text("Best available").tag(ModelSelection?.none)
+                ForEach(modelSelectionOptions, id: \.self) { selection in
+                    Text(selectionLabel(for: selection)).tag(Optional(selection))
                 }
             }
             .help("Default model for new sessions in this project.")
@@ -199,12 +199,12 @@ struct ProjectOverviewView: View {
         }
     }
 
-    private var modelKindBinding: Binding<ModelDescriptor.Kind?> {
+    private var modelSelectionBinding: Binding<ModelSelection?> {
         Binding(
-            get: { project.modelKind },
+            get: { project.modelSelection },
             set: { newValue in
-                if project.modelKind != newValue {
-                    project.modelKind = newValue
+                if project.modelSelection != newValue {
+                    project.modelSelection = newValue
                     try? modelContext.save()
                 }
             }
@@ -223,24 +223,41 @@ struct ProjectOverviewView: View {
         )
     }
 
-    /// The catalog's model kinds, plus the saved choice if the catalog
-    /// hasn't probed it yet, so the Picker's tags always include the
+    /// The catalog's models as picker options, plus the saved choice
+    /// if the catalog hasn't seen it yet (a stale probe, or a model
+    /// that left the library), so the Picker's tags always include the
     /// current selection.
-    private var modelKindOptions: [ModelDescriptor.Kind] {
-        var kinds = catalog.descriptors.map(\.kind)
-        if let current = project.modelKind, !kinds.contains(current) {
-            kinds.append(current)
+    private var modelSelectionOptions: [ModelSelection] {
+        var options: [ModelSelection] = []
+        for descriptor in catalog.descriptors {
+            let selection: ModelSelection? = switch descriptor.kind {
+            case .afmCore:
+                .afmCore
+            case .afmCoreAdvanced:
+                .afmCoreAdvanced
+            case .mlx:
+                descriptor.mlxRepoID.map { ModelSelection.mlx(repoID: $0) }
+            }
+            if let selection, !options.contains(selection) {
+                options.append(selection)
+            }
         }
-        return kinds
+        if let current = project.modelSelection, !options.contains(current) {
+            options.append(current)
+        }
+        return options
     }
 
-    private func kindLabel(for kind: ModelDescriptor.Kind) -> String {
-        if let descriptor = catalog.descriptor(for: kind) {
-            return descriptor.displayName
-        }
-        switch kind {
-        case .afmCore: return "AFM 3 Core"
-        case .afmCoreAdvanced: return "AFM 3 Core Advanced"
+    private func selectionLabel(for selection: ModelSelection) -> String {
+        switch selection {
+        case .bestAvailable:
+            return "Best available"
+        case .afmCore:
+            return catalog.descriptor(for: .afmCore)?.displayName ?? "AFM 3 Core"
+        case .afmCoreAdvanced:
+            return catalog.descriptor(for: .afmCoreAdvanced)?.displayName ?? "AFM 3 Core Advanced"
+        case .mlx(let repoID):
+            return catalog.descriptor(for: .mlx, mlxRepoID: repoID)?.displayName ?? repoID
         }
     }
 

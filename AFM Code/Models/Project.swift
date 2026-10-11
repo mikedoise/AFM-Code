@@ -17,8 +17,12 @@ final class Project {
     /// Security-scoped bookmark for the project folder.
     var bookmarkData: Data?
     /// `ModelDescriptor.Kind.rawValue` used for new sessions in this
-    /// project. `nil` means "best available on-device model".
+    /// project. `nil` means "best available" (the on-device model, or
+    /// the first ready MLX model).
     var modelKindRaw: String?
+    /// The MLX model's Hugging Face repository id for new sessions,
+    /// when `modelKindRaw` is `"mlx"`.
+    var mlxModelID: String?
     /// Commands the user chose "Always Allow" for in this project.
     /// Exact match after whitespace normalization. Optional (not an
     /// empty array) so the schema migration can backfill existing
@@ -45,6 +49,40 @@ final class Project {
     var modelKind: ModelDescriptor.Kind? {
         get { modelKindRaw.flatMap(ModelDescriptor.Kind.init(rawValue:)) }
         set { modelKindRaw = newValue?.rawValue }
+    }
+
+    /// The project's model choice as a picker value: the two kinds and
+    /// a specific MLX repository. An MLX kind without a repository
+    /// (which pickers never produce) reads as "best available".
+    var modelSelection: ModelSelection? {
+        get {
+            guard let kind = modelKind else { return .bestAvailable }
+            switch kind {
+            case .afmCore:
+                return .afmCore
+            case .afmCoreAdvanced:
+                return .afmCoreAdvanced
+            case .mlx:
+                if let mlxModelID { return .mlx(repoID: mlxModelID) }
+                return .bestAvailable
+            }
+        }
+        set {
+            switch newValue ?? .bestAvailable {
+            case .bestAvailable:
+                modelKindRaw = nil
+                mlxModelID = nil
+            case .afmCore:
+                modelKindRaw = ModelDescriptor.Kind.afmCore.rawValue
+                mlxModelID = nil
+            case .afmCoreAdvanced:
+                modelKindRaw = ModelDescriptor.Kind.afmCoreAdvanced.rawValue
+                mlxModelID = nil
+            case .mlx(let repoID):
+                modelKindRaw = ModelDescriptor.Kind.mlx.rawValue
+                mlxModelID = repoID
+            }
+        }
     }
 
     var approvalMode: ApprovalMode? {

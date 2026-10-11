@@ -7,6 +7,7 @@ import SwiftData
 /// the library, download their weights, and remove them.
 struct ModelsView: View {
     @Environment(MLXModelManager.self) private var mlx
+    @Environment(ModelCatalog.self) private var catalog
     @Query(sort: \MlxModel.addedAt, order: .reverse) private var models: [MlxModel]
     @State private var manualRepoID = ""
 
@@ -68,6 +69,7 @@ struct ModelsView: View {
                     Button("Add") {
                         mlx.add(repoID: manualRepoID)
                         manualRepoID = ""
+                        Task { await catalog.refreshMlxModels() }
                     }
                     .disabled(manualRepoID.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
@@ -108,6 +110,7 @@ struct ModelsView: View {
                 } else {
                     Button("Add") {
                         mlx.add(repoID: repoID, result: result)
+                        Task { await catalog.refreshMlxModels() }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -157,6 +160,7 @@ private struct LibraryRow: View {
     let model: MlxModel
 
     @Environment(MLXModelManager.self) private var mlx
+    @Environment(ModelCatalog.self) private var catalog
     @State private var state: MLXModelManager.ModelState = .unknown
 
     var body: some View {
@@ -198,6 +202,11 @@ private struct LibraryRow: View {
         .padding(.vertical, 2)
         .task(id: downloadActive) {
             state = await mlx.state(for: model)
+            // The library changed under the catalog (download started
+            // or finished, weights appeared): re-derive the MLX
+            // descriptors so chat pickers and the context window stay
+            // current.
+            await catalog.refreshMlxModels()
         }
     }
 
@@ -239,6 +248,7 @@ private struct LibraryRow: View {
         }
         Button {
             mlx.remove(model)
+            Task { await catalog.refreshMlxModels() }
         } label: {
             Image(systemName: "trash")
         }

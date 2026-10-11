@@ -78,6 +78,7 @@ final class ChatController {
         for session: ChatSession,
         modelContext: ModelContext,
         catalog: ModelCatalog,
+        mlx: MLXModelManager,
         workspaces: WorkspaceStore,
         settings: AppSettings
     ) -> SessionEngine {
@@ -88,6 +89,7 @@ final class ChatController {
             session: session,
             modelContext: modelContext,
             catalog: catalog,
+            mlx: mlx,
             workspaces: workspaces,
             settings: settings
         )

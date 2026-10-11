@@ -1,8 +1,10 @@
 import Foundation
 import FoundationModels
+import MLXFoundationModels
 import Observation
 import OSLog
 import SwiftData
+import Tokenizers
 
 /// Drives one chat session.
 ///
@@ -33,8 +35,16 @@ final class SessionEngine {
     let session: ChatSession
     private let modelContext: ModelContext
     private let catalog: ModelCatalog
+    private let mlx: MLXModelManager
     private let settings: AppSettings
     private(set) var toolContext: ToolContext?
+
+    /// Where this session's prompts actually go: the on-device AFM
+    /// model, or the adapter for a model from the user's MLX library.
+    private enum ModelSource {
+        case afm
+        case mlx(MlxModel)
+    }
 
     private(set) var state: State = .idle
     /// Live token text for the in-flight assistant response.
@@ -48,6 +58,12 @@ final class SessionEngine {
     /// model refuses input beyond a window smaller than its advertised
     /// `contextSize`; the smallest limit observed so far wins.
     private(set) var effectiveContextSize: Int?
+    /// The MLX tokenizer for counting context, loaded once per model
+    /// from the downloaded weights. `nil` until it has been loaded (or
+    /// while the weights aren't on disk yet).
+    private var mlxTokenizer: Tokenizers.Tokenizer?
+    /// The repository id the cached tokenizer was loaded from.
+    private var mlxTokenizerRepoID: String?
 
     private var languageModelSession: LanguageModelSession?
     private var sendTask: Task<Void, Never>?
@@ -63,12 +79,14 @@ final class SessionEngine {
         session: ChatSession,
         modelContext: ModelContext,
         catalog: ModelCatalog,
+        mlx: MLXModelManager,
         workspaces: WorkspaceStore,
         settings: AppSettings
     ) {
         self.session = session
         self.modelContext = modelContext
         self.catalog = catalog
+        self.mlx = mlx
         self.settings = settings
         self.toolContext = nil
         if let project = session.project {
@@ -92,12 +110,42 @@ final class SessionEngine {
     /// choice, then the project's default, then the best available.
     var activeModel: ModelDescriptor? {
         if let kind = session.modelKind {
-            return catalog.descriptor(for: kind)
+            return Self.resolveModelKind(kind, mlxModelID: session.mlxModelID, catalog: catalog)
         }
         if let kind = session.project?.modelKind {
-            return catalog.descriptor(for: kind)
+            return Self.resolveModelKind(kind, mlxModelID: session.project?.mlxModelID, catalog: catalog)
         }
         return catalog.activeDescriptor
+    }
+
+    /// The session's explicit (or inherited) choice as a descriptor:
+    /// the kind always resolves; an MLX choice resolves to the specific
+    /// library model, and a choice whose model left the library falls
+    /// through to the best available rather than pointing at nothing.
+    private static func resolveModelKind(
+        _ kind: ModelDescriptor.Kind,
+        mlxModelID: String?,
+        catalog: ModelCatalog
+    ) -> ModelDescriptor? {
+        if kind == .mlx {
+            if let mlxModelID, let descriptor = catalog.descriptor(for: .mlx, mlxRepoID: mlxModelID) {
+                return descriptor
+            }
+            return catalog.activeDescriptor
+        }
+        return catalog.descriptor(for: kind)
+    }
+
+    /// Where this session's prompts actually go, resolved the same way
+    /// as `activeModel` — the two must never disagree.
+    private var modelSource: ModelSource {
+        guard let descriptor = activeModel, descriptor.kind == .mlx,
+              let repoID = descriptor.mlxRepoID,
+              let mlxModel = mlx.model(forRepoID: repoID)
+        else {
+            return .afm
+        }
+        return .mlx(mlxModel)
     }
 
     /// The session's real context window: a runtime limit observed
@@ -113,15 +161,42 @@ final class SessionEngine {
 
     // MARK: - Session lifecycle
 
-    /// Lazily create the underlying `LanguageModelSession`, resuming
-    /// from the persisted transcript when one exists.
+    /// Lazily create the underlying `LanguageModelSession` on the
+    /// session's model, resuming from the persisted transcript when
+    /// one exists.
     private func ensureLanguageModelSession() {
         guard languageModelSession == nil else { return }
-        let model = SystemLanguageModel.default
+        switch modelSource {
+        case .afm:
+            let model = SystemLanguageModel.default
+            // Tools only when the model variant supports them and
+            // this session has a project folder to work in.
+            let supportsTools = model.isAvailable && model.capabilities.contains(.toolCalling)
+            configureSession(model: model, supportsTools: supportsTools)
+        case .mlx(let mlxModel):
+            let model = mlx.languageModel(for: mlxModel)
+            // The adapter declares the stored capability names; the
+            // MLX model must be downloaded (or downloading) for the
+            // adapter to serve a turn.
+            let supportsTools = model.capabilities.contains(.toolCalling)
+            configureSession(model: model, supportsTools: supportsTools)
+            if mlxModel.maxContextTokens == nil {
+                // Backfill the context window from the model's local
+                // config.json, then let the catalog learn it.
+                Task { [weak self] in
+                    await self?.mlx.ensureContextSize(for: mlxModel)
+                    await self?.catalog.refreshMlxModels()
+                }
+            }
+        }
+    }
 
-        // Tools only when the model variant supports them and this
-        // session has a project folder to work in.
-        let supportsTools = model.isAvailable && model.capabilities.contains(.toolCalling)
+    /// Shared session construction for both model sources: resolve the
+    /// tools the session runs with, refresh the instructions entry so
+    /// the model always sees the current prompt, project context, and
+    /// tool definitions, and build the session — resuming the saved
+    /// transcript when one exists.
+    private func configureSession<M: LanguageModel>(model: M, supportsTools: Bool) {
         let tools = (supportsTools && toolContext != nil)
             ? CodingTools(context: toolContext!).tools
             : []
@@ -131,7 +206,7 @@ final class SessionEngine {
             includesTools: !tools.isEmpty,
             project: Self.makeProjectInfo(toolContext: toolContext),
             basePrompt: settings.systemPrompt,
-            contextSize: effectiveContextSize ?? (model.isAvailable ? model.contextSize : nil)
+            contextSize: contextSize
         )
 
         if let data = session.transcriptData,
@@ -150,9 +225,11 @@ final class SessionEngine {
                 transcript: transcript
             )
         } else {
-            languageModelSession = LanguageModelSession(model: model, tools: tools) {
-                prompt
-            }
+            languageModelSession = LanguageModelSession(
+                model: model,
+                tools: tools,
+                instructions: Instructions(prompt)
+            )
         }
         languageModelSession?.transcriptErrorHandlingPolicy = .revertTranscript
         prewarm()
@@ -437,17 +514,72 @@ final class SessionEngine {
 
     // MARK: - Context budgeting
 
-    /// Measure the transcript against the model's context window.
+    /// Measure the transcript against the model's context window, the
+    /// way that model counts: the framework's own count for the
+    /// on-device model, its own tokenizer for MLX models.
     private func refreshContextUsage() async {
         guard let languageModelSession else { return }
-        let model = SystemLanguageModel.default
-        guard model.isAvailable else { return }
-        do {
-            let used = try await model.tokenCount(for: languageModelSession.transcript)
-            contextTokenCount = used
+        let used: Int?
+        switch modelSource {
+        case .afm:
+            let model = SystemLanguageModel.default
+            guard model.isAvailable else { return }
+            do {
+                used = try await model.tokenCount(for: languageModelSession.transcript)
+            } catch {
+                used = nil
+            }
+        case .mlx(let mlxModel):
+            guard let tokenizer = await mlxTokenizer(for: mlxModel) else {
+                // The gauge hides rather than misreports: without the
+                // weights on disk there's no tokenizer to count with.
+                contextTokenCount = nil
+                return
+            }
+            let text = Self.renderTranscriptText(languageModelSession.transcript)
+            used = tokenizer.encode(text: text).count
+        }
+        contextTokenCount = used
+        if let used {
             session.lastTokenCount = used
+        }
+    }
+
+    /// Count tokens the way the session's model sees them: the
+    /// framework's own count for the on-device model, and the model's
+    /// own tokenizer for MLX models. `nil` when the count can't be
+    /// made (weights not downloaded yet, …).
+    private func tokenCount(for entries: [Transcript.Entry]) async -> Int? {
+        switch modelSource {
+        case .afm:
+            let model = SystemLanguageModel.default
+            guard model.isAvailable else { return nil }
+            return try? await model.tokenCount(for: entries)
+        case .mlx(let mlxModel):
+            guard let tokenizer = await mlxTokenizer(for: mlxModel) else { return nil }
+            let text = Self.renderTranscriptText(entries)
+            return tokenizer.encode(text: text).count
+        }
+    }
+
+    /// The tokenizer for an MLX model, loaded from its downloaded
+    /// weights and cached for the engine's lifetime. Local-only: the
+    /// load reads the snapshot directory and never touches the network;
+    /// a model without the downloaded tokenizer files simply yields
+    /// `nil` and the context gauge hides itself.
+    private func mlxTokenizer(for model: MlxModel) async -> Tokenizers.Tokenizer? {
+        if let tokenizer = mlxTokenizer, mlxTokenizerRepoID == model.repoID {
+            return tokenizer
+        }
+        guard let directory = mlx.weightsDirectory(for: model) else { return nil }
+        do {
+            let tokenizer = try await AutoTokenizer.from(modelFolder: directory, strict: false)
+            mlxTokenizer = tokenizer
+            mlxTokenizerRepoID = model.repoID
+            return tokenizer
         } catch {
-            contextTokenCount = nil
+            Self.logger.info("tokenizer load failed for \(model.repoID): \(error.localizedDescription)")
+            return nil
         }
     }
 
@@ -456,10 +588,8 @@ final class SessionEngine {
     /// that still leaves it above 90%, compress everything.
     private func maybeCompact() async {
         guard !isCompacting else { return }
-        let model = SystemLanguageModel.default
-        guard model.isAvailable else { return }
-        let size = effectiveContextSize ?? model.contextSize
-        guard size > 0 else { return }
+        let size = effectiveContextSize ?? activeModel?.contextSize
+        guard let size, size > 0 else { return }
 
         var used = contextTokenCount
         if used == nil {
@@ -486,8 +616,6 @@ final class SessionEngine {
         guard let modelSession = languageModelSession, !modelSession.isResponding, !isCompacting else {
             return false
         }
-        let model = SystemLanguageModel.default
-        guard model.isAvailable else { return false }
 
         isCompacting = true
         defer { isCompacting = false }
@@ -508,13 +636,41 @@ final class SessionEngine {
         guard !oldEntries.isEmpty else { return false }
 
         // Not enough history to be worth a summarization round trip.
-        guard let oldTokens = try? await model.tokenCount(for: oldEntries),
+        guard let oldTokens = await tokenCount(for: oldEntries),
               oldTokens >= 1024 else {
             return false
         }
 
-        // A disposable, tool-free session on the same model does the
-        // summarizing; it never touches the live transcript.
+        // A disposable, tool-free session on the session's own model
+        // does the summarizing; it never touches the live transcript.
+        switch modelSource {
+        case .afm:
+            return await summarize(
+                model: SystemLanguageModel.default,
+                entries: entries,
+                oldEntries: oldEntries,
+                splitIndex: splitIndex
+            )
+        case .mlx(let mlxModel):
+            return await summarize(
+                model: mlx.languageModel(for: mlxModel),
+                entries: entries,
+                oldEntries: oldEntries,
+                splitIndex: splitIndex
+            )
+        }
+    }
+
+    /// Summarize `oldEntries` with a disposable, tool-free session on
+    /// `model`, then rebuild the live session around the summary. Both
+    /// model sources share this: the framework drives the loop the same
+    /// way for any `LanguageModel`.
+    private func summarize<M: LanguageModel>(
+        model: M,
+        entries: [Transcript.Entry],
+        oldEntries: [Transcript.Entry],
+        splitIndex: Int
+    ) async -> Bool {
         let instructions = Instructions(Self.compactorInstructions)
         let summarizer = LanguageModelSession(model: model, tools: [], instructions: instructions)
         var options = GenerationOptions()
@@ -541,17 +697,17 @@ final class SessionEngine {
     /// [fresh instructions, compressed summary, kept tail], so the
     /// agent continues from the summary but still sees the current
     /// project context and its most recent turn verbatim.
-    private func rebuildSession(
+    private func rebuildSession<M: LanguageModel>(
         entries: [Transcript.Entry],
         from splitIndex: Int,
         summary: String,
-        model: SystemLanguageModel
+        model: M
     ) {
         let prompt = AgentInstructions.prompt(
             includesTools: sessionHasTools,
             project: Self.makeProjectInfo(toolContext: toolContext),
             basePrompt: settings.systemPrompt,
-            contextSize: effectiveContextSize ?? (model.isAvailable ? model.contextSize : nil)
+            contextSize: contextSize
         )
         var newEntries: [Transcript.Entry] = [
             Self.makeInstructionsEntry(prompt: prompt, tools: sessionHasTools ? sessionTools : [])
@@ -657,34 +813,64 @@ final class SessionEngine {
         return rendered
     }
 
-    /// One transcript entry as plain text the summarizer can read.
-    private static func renderEntry(_ entry: Transcript.Entry) -> String? {
+    /// One transcript entry as plain text. Bounded mode (the default)
+    /// caps pieces so the compactor's summary request stays small;
+    /// unbounded mode renders everything, because the tokenizer counts
+    /// what the model actually has to read.
+    private static func renderEntry(_ entry: Transcript.Entry, unbounded: Bool = false) -> String? {
+        let cap: Int? = unbounded ? nil : 2_000
         switch entry {
-        case .instructions:
-            // Stable content; rebuilt on resume and on compaction.
-            return nil
+        case .instructions(let instructions):
+            // Bounded mode skips the instructions entry (it's stable
+            // and rebuilt on resume and on compaction, so it doesn't
+            // need summarizing); unbounded counting includes it, since
+            // the model reads it every turn.
+            guard unbounded else { return nil }
+            var text = "SYSTEM: " + Self.segmentText(instructions.segments, cap: nil)
+            let definitions = instructions.toolDefinitions
+                .map { "\($0.name): \($0.description)" }
+                .joined(separator: "\n")
+            if !definitions.isEmpty {
+                text += "\nTOOLS: \(definitions)"
+            }
+            return text
         case .prompt(let prompt):
-            return "USER: \(Self.segmentText(prompt.segments))"
+            return "USER: \(Self.segmentText(prompt.segments, cap: cap))"
         case .response(let response):
-            return "ASSISTANT: \(Self.segmentText(response.segments))"
+            return "ASSISTANT: \(Self.segmentText(response.segments, cap: cap))"
         case .reasoning(let reasoning):
-            let text = Self.segmentText(reasoning.segments)
+            let text = Self.segmentText(reasoning.segments, cap: cap)
             return text.isEmpty ? nil : "AGENT THINKING: \(text)"
         case .toolCalls(let calls):
             let items = calls.map { call in
-                "\(call.toolName)(\(Self.summarizeArguments(call.arguments.jsonString)))"
+                "\(call.toolName)(\(Self.summarizeArguments(call.arguments.jsonString, unbounded: unbounded)))"
             }
             guard !items.isEmpty else { return nil }
-            return String(("TOOL CALLS: " + items.joined(separator: "\n")).prefix(2_000))
+            let text = "TOOL CALLS: " + items.joined(separator: "\n")
+            return unbounded ? text : String(text.prefix(2_000))
         case .toolOutput(let output):
-            return "TOOL RESULT (\(output.toolName)): \(Self.segmentText(output.segments, cap: 1_200))"
+            let outputCap: Int? = unbounded ? nil : 1_200
+            return "TOOL RESULT (\(output.toolName)): \(Self.segmentText(output.segments, cap: outputCap))"
         @unknown default:
             return nil
         }
     }
 
-    /// Flatten a segment list to text, capped.
-    private static func segmentText(_ segments: [Transcript.Segment], cap: Int = 2_000) -> String {
+    /// The transcript's entries as plain text without any of the
+    /// compactor's size caps — for token counting, not summarizing.
+    private static func renderTranscriptText(_ entries: some Collection<Transcript.Entry>) -> String {
+        var pieces: [String] = []
+        for entry in entries {
+            if let piece = renderEntry(entry, unbounded: true) {
+                pieces.append(piece)
+            }
+        }
+        return pieces.joined(separator: "\n\n")
+    }
+
+    /// Flatten a segment list to text. `cap` bounds the result; `nil`
+    /// means no bound (token counting needs the full text).
+    private static func segmentText(_ segments: [Transcript.Segment], cap: Int? = 2_000) -> String {
         var text = ""
         for segment in segments {
             switch segment {
@@ -700,13 +886,16 @@ final class SessionEngine {
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
-        guard trimmed.count > cap else { return trimmed }
+        guard let cap, trimmed.count > cap else { return trimmed }
         return String(trimmed.prefix(cap)) + " …(truncated)"
     }
 
     /// Tool-call arguments as JSON, with long string values trimmed so
     /// file contents can't drown the summary while paths stay visible.
-    private static func summarizeArguments(_ jsonString: String) -> String {
+    /// Unbounded mode returns the stored arguments as-is: token
+    /// counting wants the true size, not a preview.
+    private static func summarizeArguments(_ jsonString: String, unbounded: Bool = false) -> String {
+        guard !unbounded else { return jsonString }
         guard let data = jsonString.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) else {
             return String(jsonString.prefix(400))

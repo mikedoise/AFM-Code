@@ -50,7 +50,11 @@ final class MLXModelManager {
         self.modelContext = modelContext
         let cache = HubCache(cacheDirectory: Self.cacheDirectory)
         self.cache = cache
-        self.hub = HubClient(host: HubClient.defaultHost, bearerToken: nil, cache: cache)
+        // No explicit token: public MLX repositories download anonymously.
+        // `.environment` follows the HF ecosystem default (HF_TOKEN and
+        // friends) when the app is launched with one, and degrades
+        // gracefully to no auth in the sandbox.
+        self.hub = HubClient(host: HubClient.defaultHost, tokenProvider: .environment, cache: cache)
         try? FileManager.default.createDirectory(
             at: cache.cacheDirectory,
             withIntermediateDirectories: true
@@ -175,7 +179,8 @@ final class MLXModelManager {
 
     /// Resolve a model identifier to its on-disk location inside the
     /// cache — the same scheme the `#huggingFaceLanguageModel` macro
-    /// uses, bound to our container cache.
+    /// uses, bound to our container cache. Nonisolated: called from
+    /// the adapter's sendable `weightsLocation` closure.
     nonisolated private static func location(forModelID id: String, cache: HubCache) -> URL {
         guard let repository = Repo.ID(rawValue: id) else {
             return cache.cacheDirectory
@@ -220,15 +225,59 @@ final class MLXModelManager {
 
     /// Start (or resume) downloading a model's weights. Download
     /// progress flows into `MLXDownloadProgress.shared`, which the UI
-    /// observes.
+    /// observes. A completed download also backfills the model's context
+    /// window from its local `config.json`.
     func download(_ model: MlxModel) async {
         do {
             try await languageModel(for: model).preload()
+            await ensureContextSize(for: model)
         } catch is CancellationError {
             Self.logger.info("download of \(model.repoID) cancelled")
         } catch {
             Self.logger.error("download of \(model.repoID) failed: \(error.localizedDescription)")
         }
+    }
+
+    /// The directory holding a model's downloaded files (config.json,
+    /// tokenizer files, weights) — `nil` until the download is present.
+    func weightsDirectory(for model: MlxModel) -> URL? {
+        let location = Self.location(forModelID: model.repoID, cache: self.cache)
+        let configURL = location.appendingPathComponent("config.json")
+        return FileManager.default.fileExists(atPath: configURL.path) ? location : nil
+    }
+
+    /// Read the model's context window from its local `config.json` and
+    /// store it on the model, so the catalog (and the context gauge)
+    /// can use it. The Hub's `?config=true` metadata does not carry
+    /// `max_position_embeddings`, so this can only run once the weights
+    /// — and their config file — are on disk.
+    @discardableResult
+    func ensureContextSize(for model: MlxModel) async -> Int? {
+        if let known = model.maxContextTokens {
+            return known
+        }
+        guard let directory = weightsDirectory(for: model) else { return nil }
+        let configURL = directory.appendingPathComponent("config.json")
+        guard let data = FileManager.default.contents(atPath: configURL.path),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let value: Int?
+        if let number = object["max_position_embeddings"] as? Int {
+            value = number
+        } else if let double = object["max_position_embeddings"] as? Double {
+            value = Int(double)
+        } else if let string = object["max_position_embeddings"] as? String, let parsed = Int(string) {
+            value = parsed
+        } else {
+            value = nil
+        }
+        if let value, value > 0 {
+            model.maxContextTokens = value
+            try? modelContext.save()
+            Self.logger.info("noted context window for \(model.repoID): \(value) tokens")
+        }
+        return model.maxContextTokens
     }
 
     /// Cancel an in-flight download. Eviction cancels the adapter's load

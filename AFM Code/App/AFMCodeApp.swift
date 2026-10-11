@@ -3,13 +3,21 @@ import SwiftData
 
 @main
 struct AFMCodeApp: App {
-    @State private var catalog = ModelCatalog()
     @State private var chat = ChatController()
     @State private var workspaces = WorkspaceStore()
     @State private var settings = AppSettings()
-    @State private var mlx = MLXModelManager(
-        modelContext: ModelContainerProvider.container.mainContext
-    )
+    @State private var mlx: MLXModelManager
+    @State private var catalog: ModelCatalog
+
+    // Built here (not in property initializers) because the catalog
+    // needs the MLX manager, and a @State property's default value can't
+    // reference a sibling property.
+    init() {
+        let context = ModelContainerProvider.container.mainContext
+        let mlxManager = MLXModelManager(modelContext: context)
+        _mlx = State(initialValue: mlxManager)
+        _catalog = State(initialValue: ModelCatalog(modelContext: context, mlx: mlxManager))
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -24,6 +32,7 @@ struct AFMCodeApp: App {
                 .focusedSceneValue(\.afmChat, chat)
                 .task {
                     await catalog.probe()
+                    await catalog.refreshMlxModels()
                 }
         }
         .defaultSize(width: 1280, height: 800)
