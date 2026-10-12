@@ -22,6 +22,13 @@ final class Message {
     var tokenCount: Int?
     /// JSON-encoded `[ToolStep]` for assistant messages.
     var toolActivityData: Data?
+    /// The model's chain-of-thought for reasoning models (assistant
+    /// messages), rendered as the collapsible thinking card. Optional so
+    /// existing rows migrate without backfill.
+    var thinkingContent: String?
+    /// `ModelDescriptor.id` of the model that produced this message
+    /// (assistant messages) — the bubble's gradient identity.
+    var modelID: String?
     var session: ChatSession?
 
     init(role: Role, content: String) {

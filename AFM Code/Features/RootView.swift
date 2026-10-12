@@ -8,6 +8,8 @@ struct RootView: View {
     @Environment(ChatController.self) private var chat
     @Environment(WorkspaceStore.self) private var workspaces
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(ChatBackgroundPreference.key)
+    private var backgroundRawValue = ChatBackgroundPreference.defaultValue.rawValue
     @Query(sort: \Project.lastOpenedAt, order: .reverse)
     private var projects: [Project]
     @Query(sort: \ChatSession.lastMessageAt, order: .reverse)
@@ -25,6 +27,14 @@ struct RootView: View {
         } detail: {
             detailPane
         }
+        .background {
+            ChatWindowBackground()
+        }
+        .preferredColorScheme(
+            (ChatBackgroundStyle(rawValue: backgroundRawValue) ?? ChatBackgroundPreference.defaultValue).isAlwaysDark
+                ? .dark
+                : nil
+        )
         .task {
             workspaces.refreshAll(projects: projects)
             chat.validateSelection(projects: projects, sessions: sessions)

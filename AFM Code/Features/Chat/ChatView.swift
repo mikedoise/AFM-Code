@@ -2,7 +2,11 @@ import MLXFoundationModels
 import SwiftUI
 import SwiftData
 
-/// The main chat pane for a session: transcript above, composer below.
+/// The main chat pane for a session: bubbles above, composer below.
+///
+/// The navigation title doubles as the model picker (the Perspective
+/// Intelligence flow): the title and the current model's name sit in
+/// the title bar, and tapping them opens the "Choose model" popover.
 struct ChatView: View {
     let session: ChatSession
 
@@ -13,7 +17,7 @@ struct ChatView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(\.modelContext) private var modelContext
     @State private var engine: SessionEngine?
-    @State private var showModelsSheet = false
+    @State private var showModelPicker = false
 
     var body: some View {
         @Bindable var chat = chat
@@ -27,13 +31,15 @@ struct ChatView: View {
             .joined(separator: ",")
         VStack(spacing: 0) {
             MessageListView(session: session, engine: engine)
-            Divider()
             ComposerView(session: session, engine: engine)
         }
-        .navigationTitle(session.title)
+        .background {
+            ChatWindowBackground()
+        }
+        .navigationTitle("")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                modelPicker
+            ToolbarItem(placement: .principal) {
+                titleModelPickerButton
             }
         }
         .onAppear {
@@ -55,119 +61,65 @@ struct ChatView: View {
         .id(session.id)
     }
 
-    /// Per-session model selection: the on-device AFM pair (the OS
-    /// decides which variant a machine gets, and the user can pin
-    /// either or back to "best available"), then the MLX models in the
-    /// library, and a shortcut to that library.
-    private var modelPicker: some View {
-        Menu {
-            Button {
-                session.modelKind = nil
-                session.mlxModelID = nil
-                try? modelContext.save()
-            } label: {
-                let isSelected = session.modelKind == nil
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Image(systemName: isSelected ? "checkmark" : "circle")
-                        Text("Best available")
-                    }
-                    Text("The on-device model, or a ready MLX model")
-                        .font(.caption2)
+    // MARK: - Title model picker
+
+    private var titleModelPickerButton: some View {
+        Button {
+            showModelPicker.toggle()
+        } label: {
+            VStack(spacing: 2) {
+                HStack(spacing: 4) {
+                    Text(session.title)
+                        .font(.body)
+                        .fontWeight(.semibold)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Image(systemName: showModelPicker ? "chevron.up" : "chevron.down")
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
+                        .imageScale(.small)
                 }
-            }
 
-            Divider()
-
-            ForEach(catalog.afmDescriptors) { descriptor in
-                modelButton(descriptor)
-            }
-
-            if !catalog.mlxDescriptors.isEmpty {
-                Divider()
-                ForEach(catalog.mlxDescriptors) { descriptor in
-                    modelButton(descriptor)
-                }
-            }
-
-            Divider()
-
-            Button {
-                showModelsSheet = true
-            } label: {
-                Label("Manage MLX Models…", systemImage: "square.stack.3d.up")
-            }
-            .help("Search the Hugging Face Hub and download models to run locally.")
-        } label: {
-            if let model = engine?.activeModel ?? catalog.activeDescriptor {
-                Label(
-                    model.displayName,
-                    systemImage: model.isAvailable ? "cpu" : "exclamationmark.triangle.fill"
-                )
-            } else {
-                Label("No Model", systemImage: "questionmark.circle")
-            }
-        }
-        .sheet(isPresented: $showModelsSheet) {
-            ModelsView()
-                .frame(width: 680, height: 640)
-        }
-        .help("Model for this session")
-    }
-
-    /// One entry of the picker for a specific model. Unavailable
-    /// models stay selectable-disabled with a reason: an MLX model
-    /// shows how to make it available, an AFM variant why it isn't.
-    private func modelButton(_ descriptor: ModelDescriptor) -> some View {
-        let isSelected = descriptor.isAvailable && (
-            descriptor.kind == .mlx
-                ? session.modelKind == .mlx && session.mlxModelID == descriptor.mlxRepoID
-                : session.modelKind == descriptor.kind
-        )
-        let statusIcon = isSelected
-            ? "checkmark"
-            : descriptor.isAvailable ? "circle" : (descriptor.kind == .mlx ? "tray.and.arrow.down" : "xmark")
-        return Button {
-            session.modelKind = descriptor.kind
-            session.mlxModelID = descriptor.kind == .mlx ? descriptor.mlxRepoID : nil
-            try? modelContext.save()
-        } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Image(systemName: statusIcon)
-                    Text(descriptor.displayName)
-                }
-                if descriptor.isAvailable {
-                    let meta = [
-                        descriptor.contextSize.map { "\(ModelBadgeView.compact($0)) ctx" },
-                        Self.capabilitySummary(descriptor)
-                    ].compactMap { $0 }
-                    if !meta.isEmpty {
-                        Text(meta.joined(separator: " · "))
+                if let model = engine?.activeModel ?? catalog.activeDescriptor {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: ModelIdentityPalette.identity(for: model).gradient,
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 7, height: 7)
+                        Text(model.displayName)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
-                } else if let detail = descriptor.availabilityDetail {
-                    Text(detail)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
                 }
             }
+            .padding(.horizontal, 4)
         }
-        .disabled(!descriptor.isAvailable)
-    }
-
-    /// "tools · reasoning · vision" from the descriptor's capability
-    /// set, in a fixed order.
-    private static func capabilitySummary(_ descriptor: ModelDescriptor) -> String? {
-        let order = ["toolCalling", "reasoning", "vision"]
-        let labels: [String: String] = [
-            "toolCalling": "tools",
-            "reasoning": "reasoning",
-            "vision": "vision"
-        ]
-        let shown = order.filter { descriptor.capabilities.contains($0) }.compactMap { labels[$0] }
-        return shown.isEmpty ? nil : shown.joined(separator: " · ")
+        .buttonStyle(.plain)
+        .help("Choose the model for this session")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Choose model")
+        .accessibilityHint("Shows the model picker")
+        .accessibilityAddTraits([.isHeader, .isButton])
+        .accessibilityAction(.default) {
+            showModelPicker.toggle()
+        }
+        .popover(isPresented: $showModelPicker, arrowEdge: .top) {
+            ModelPickerPanel(session: session, catalog: catalog)
+                .frame(
+                    minWidth: 360, idealWidth: 480, maxWidth: 560,
+                    minHeight: 300, idealHeight: 440, maxHeight: 560
+                )
+                .padding(12)
+                .presentationBackground {
+                    ChatWindowBackground()
+                }
+        }
     }
 }

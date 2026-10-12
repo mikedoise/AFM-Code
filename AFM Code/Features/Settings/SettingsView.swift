@@ -5,13 +5,19 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(ModelCatalog.self) private var catalog
+    @Environment(\.colorScheme) private var colorScheme
     @State private var showModels = false
+    @AppStorage(ChatBubblePreference.key)
+    private var bubbleStyleRawValue = ChatBubblePreference.defaultValue.rawValue
+    @AppStorage(ChatBackgroundPreference.key)
+    private var backgroundRawValue = ChatBackgroundPreference.defaultValue.rawValue
 
     var body: some View {
         Form {
             promptSection
             modelSection
             mlxSection
+            appearanceSection
         }
         .formStyle(.grouped)
         .frame(width: 700, height: 620)
@@ -71,7 +77,7 @@ struct SettingsView: View {
         } header: {
             Text("Model")
         } footer: {
-            Text("The operating system decides which on-device model this Mac gets; AFM Code reports it but can't change it. Models are selected per session from the chat toolbar.")
+            Text("The operating system decides which on-device model this Mac gets; AFM Code reports it but can't change it. Models are selected per session from the chat title.")
         }
     }
 
@@ -94,5 +100,74 @@ struct SettingsView: View {
             ModelsView()
                 .frame(width: 680, height: 640)
         }
+    }
+
+    // MARK: - Appearance
+
+    private var appearanceSection: some View {
+        Section {
+            Picker("Message bubbles", selection: bubbleStyleBinding) {
+                ForEach(ChatBubbleStyle.allCases) { style in
+                    Text(style.displayName)
+                        .tag(style.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
+            .help("Model colors renders assistant replies on the model's gradient; theme uses a neutral surface.")
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Chat background")
+                    .font(.headline)
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible()), count: 5),
+                    spacing: 10
+                ) {
+                    ForEach(ChatBackgroundStyle.allCases) { style in
+                        backgroundSwatch(style)
+                    }
+                }
+            }
+        } header: {
+            Text("Appearance")
+        } footer: {
+            Text("The palette colors the chat window and, for the deeper palettes, switches it to dark mode. Bubble style applies to assistant replies in every session.")
+        }
+    }
+
+    private var bubbleStyleBinding: Binding<ChatBubbleStyle> {
+        Binding(
+            get: { ChatBubbleStyle(rawValue: bubbleStyleRawValue) ?? ChatBubblePreference.defaultValue },
+            set: { bubbleStyleRawValue = $0.rawValue }
+        )
+    }
+
+    private func backgroundSwatch(_ style: ChatBackgroundStyle) -> some View {
+        let selected = style == (ChatBackgroundStyle(rawValue: backgroundRawValue) ?? ChatBackgroundPreference.defaultValue)
+        return Button {
+            backgroundRawValue = style.rawValue
+        } label: {
+            VStack(spacing: 4) {
+                Circle()
+                    .fill(style.color(for: colorScheme))
+                    .frame(width: 26, height: 26)
+                    .overlay(
+                        Circle().strokeBorder(.quaternary, lineWidth: 1)
+                    )
+                    .overlay(
+                        Circle().strokeBorder(
+                            selected ? Color.accentColor : .clear,
+                            lineWidth: 2
+                        )
+                    )
+                Text(style.displayName)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .buttonStyle(.plain)
+        .help(style.displayName)
+        .accessibilityLabel("Background: \(style.displayName)")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

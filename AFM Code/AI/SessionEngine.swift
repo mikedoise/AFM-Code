@@ -49,6 +49,9 @@ final class SessionEngine {
     private(set) var state: State = .idle
     /// Live token text for the in-flight assistant response.
     private(set) var streamingText: String = ""
+    /// Live chain-of-thought text from the in-flight response (reasoning
+    /// models); the thinking card mirrors it while the turn runs.
+    private(set) var streamingReasoning: String = ""
     /// Tokens currently consumed by the session transcript.
     private(set) var contextTokenCount: Int?
     /// Output tokens of the most recent completed response.
@@ -366,6 +369,7 @@ final class SessionEngine {
             toolContext?.endTurn()
         }
         streamingText = ""
+        streamingReasoning = ""
         // Compact before persisting, so the saved transcript matches
         // what the session actually continues from. Not after a
         // cancellation — the user asked for it to stop.
@@ -386,6 +390,7 @@ final class SessionEngine {
         }
         state = .responding
         streamingText = ""
+        streamingReasoning = ""
 
         var options = GenerationOptions()
         if sessionHasTools {
@@ -396,6 +401,7 @@ final class SessionEngine {
             let stream = languageModelSession.streamResponse(to: Prompt(prompt), options: options)
             for try await snapshot in stream {
                 streamingText = snapshot.content
+                updateStreamingReasoning(from: snapshot.transcriptEntries)
             }
             let response = try await stream.collect()
             finalizeAssistantResponse(response)
@@ -478,6 +484,38 @@ final class SessionEngine {
         session.lastMessageAt = Date()
     }
 
+    /// Mirror the current turn's reasoning text: the session transcript
+    /// accumulates a `Transcript.Reasoning` entry as the model thinks, so
+    /// reading it is how the UI gets the chain of thought live.
+    private func updateStreamingReasoning(from entries: some Collection<Transcript.Entry>) {
+        for entry in entries.reversed() {
+            if case .reasoning(let reasoning) = entry {
+                streamingReasoning = Self.segmentText(reasoning.segments, cap: nil)
+                return
+            }
+        }
+        streamingReasoning = ""
+    }
+
+    /// The reasoning text to persist with the assistant message: the
+    /// transcript's entry when present, else whatever the stream mirror
+    /// holds (covers the roll-back paths, where the transcript no longer
+    /// has the current turn).
+    private var currentThinkingContent: String? {
+        var fromTranscript: String?
+        if let transcript = languageModelSession?.transcript {
+            for entry in transcript.reversed() {
+                if case .reasoning(let reasoning) = entry {
+                    fromTranscript = Self.segmentText(reasoning.segments, cap: nil)
+                    break
+                }
+            }
+        }
+        let text = (fromTranscript ?? streamingReasoning)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
     private func persistUserMessage(_ text: String) {
         let message = Message(role: .user, content: text)
         attach(message)
@@ -493,6 +531,8 @@ final class SessionEngine {
         message.tokenCount = response.usage.totalTokenCount
         lastResponseTokens = response.usage.totalTokenCount
         message.toolActivity = steps.isEmpty ? nil : steps
+        message.thinkingContent = currentThinkingContent
+        message.modelID = activeModel?.id
         attach(message)
     }
 
@@ -504,6 +544,8 @@ final class SessionEngine {
         guard !text.isEmpty || !steps.isEmpty else { return }
         let message = Message(role: .assistant, content: text)
         message.toolActivity = steps.isEmpty ? nil : steps
+        message.thinkingContent = currentThinkingContent
+        message.modelID = activeModel?.id
         attach(message)
     }
 

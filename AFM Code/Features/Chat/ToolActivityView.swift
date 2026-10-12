@@ -1,22 +1,10 @@
 import SwiftUI
 
-/// The list of tool steps for one turn (live or from history).
-struct ToolStepListView: View {
-    let steps: [ToolStep]
-    /// Nil for history rows — no approval buttons.
-    var approvals: ToolApprovalService? = nil
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(steps) { step in
-                ToolStepView(step: step, approvals: approvals)
-            }
-        }
-    }
-}
-
 /// One tool step: an approval card while awaiting a decision, a
 /// compact (expandable) row once resolved.
+///
+/// The list of steps is the `StepsDisclosureCard`; this is the row
+/// inside it.
 struct ToolStepView: View {
     let step: ToolStep
     var approvals: ToolApprovalService? = nil

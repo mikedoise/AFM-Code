@@ -1,9 +1,12 @@
 import SwiftUI
 
-/// The prompt box: an expanding text field, send/stop control,
-/// model badge, and context meter.
+/// The prompt box in the Perspective Intelligence style: a rounded
+/// container holding the native text input and the send/stop button,
+/// with the session's model badge, context meter, and status line
+/// beneath.
 ///
-/// Key handling: Return sends, Shift-Return inserts a line break.
+/// Key handling: Return sends, Shift-Return inserts a line break
+/// (handled inside `ChatInputTextView`).
 struct ComposerView: View {
     let session: ChatSession
     let engine: SessionEngine?
@@ -15,113 +18,37 @@ struct ComposerView: View {
 
     private var model: ModelDescriptor? { engine?.activeModel ?? catalog.activeDescriptor }
 
+    private var isBusy: Bool { engine?.isBusy == true }
+
     private var canSend: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && model?.isAvailable == true
+            && !isBusy
+            && engine?.isCompacting != true
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let error = engine?.errorMessage {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            }
+        VStack(spacing: 0) {
+            // Decorative separator; VoiceOver otherwise stops on a
+            // blank element.
+            Divider().opacity(0.3)
+                .accessibilityHidden(true)
 
-            HStack(alignment: .bottom, spacing: 10) {
-                TextEditor(text: $draft)
-                    .font(.body)
-                    .autocorrectionDisabled()
-                    .frame(minHeight: 44, maxHeight: 160)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(.quaternary)
-                            .opacity(0.5)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .strokeBorder(isFocused ? Color.accentColor.opacity(0.5) : Color.secondary.opacity(0.35))
-                    )
-                    .focused($isFocused)
-                    .onKeyPress(.return, phases: .down) { press in
-                        if press.modifiers.contains(.shift) {
-                            return .ignored
-                        }
-                        submit()
-                        return .handled
-                    }
+            VStack(spacing: 12) {
+                if let error = engine?.errorMessage {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                }
 
-                if engine?.isBusy == true {
-                    Button {
-                        engine?.cancel()
-                    } label: {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 26))
-                            .foregroundStyle(.red)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop generating")
-                } else {
-                    Button(action: submit) {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 26))
-                            .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.4))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canSend)
-                    .help("Send (Return)")
-                }
-            }
+                messageInputField
 
-            HStack(spacing: 10) {
-                ModelBadgeView()
-                if let size = engine?.contextSize, size > 0 {
-                    let used = engine?.contextTokenCount
-                    let ratio = used.map { min(Double($0) / Double(size), 1.0) } ?? 0
-                    HStack(spacing: 5) {
-                        Image(systemName: "gauge.medium")
-                            .foregroundStyle(contextColor(used: used, size: size))
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(.quaternary)
-                            .overlay(alignment: .leading) {
-                                GeometryReader { proxy in
-                                    Rectangle()
-                                        .fill(contextColor(used: used, size: size))
-                                        .frame(width: max(0, proxy.size.width * ratio))
-                                }
-                            }
-                            .clipShape(RoundedRectangle(cornerRadius: 2))
-                            .frame(width: 56, height: 5)
-                            .opacity(used == nil ? 0.35 : 1)
-                        Text(used.map { "\(ModelBadgeView.compact($0)) / \(ModelBadgeView.compact(size)) tokens" }
-                             ?? "\(ModelBadgeView.compact(size)) token window")
-                            .foregroundStyle(.secondary)
-                    }
-                    .font(.caption2)
-                    .help(used == nil
-                          ? "The model's context window. Usage is counted once the transcript is measured."
-                          : "Context used by this session against the model's window. Older history compresses automatically as it fills.")
-                }
-                if engine?.isCompacting == true {
-                    HStack(spacing: 4) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Compressing history…")
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text("Return to send · Shift-Return for a new line")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                metadataRow
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
         }
-        .padding(12)
-        .background(.bar)
         .onAppear {
             isFocused = true
         }
@@ -144,6 +71,113 @@ struct ComposerView: View {
             }
         }
     }
+
+    // MARK: - Input
+
+    private var messageInputField: some View {
+        HStack(spacing: 8) {
+            ChatInputTextView(
+                text: $draft,
+                placeholder: "Ask AFM Code…",
+                isDisabled: model?.isAvailable == false,
+                accessibilityLabel: "Message AFM Code",
+                onSubmit: { _ in submit() }
+            )
+            .focused($isFocused)
+
+            sendButton
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.platformTextBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(
+                    isFocused ? Color.platformSeparator.opacity(0.5) : Color.platformSeparator.opacity(0.3),
+                    lineWidth: 1
+                )
+        )
+    }
+
+    private var sendButton: some View {
+        Button {
+            if isBusy {
+                engine?.cancel()
+            } else {
+                submit()
+            }
+        } label: {
+            Image(systemName: isBusy ? "stop.circle.fill" : "arrow.up.circle.fill")
+                .font(.system(size: 26))
+                .foregroundStyle(sendButtonColor)
+                .contentTransition(.symbolEffect(.replace))
+                .animation(.easeInOut(duration: 0.2), value: isBusy)
+        }
+        .buttonStyle(.plain)
+        .disabled(!canSend && !isBusy)
+        .accessibilityLabel(isBusy ? "Stop generating" : "Send message")
+        .help(isBusy ? "Stop generating" : "Send (Return)")
+    }
+
+    private var sendButtonColor: Color {
+        if isBusy {
+            return .red
+        }
+        return canSend ? Color.accentColor : .secondary.opacity(0.5)
+    }
+
+    // MARK: - Metadata row
+
+    private var metadataRow: some View {
+        HStack(spacing: 10) {
+            ModelBadgeView()
+            if let size = engine?.contextSize, size > 0 {
+                let used = engine?.contextTokenCount
+                let ratio = used.map { min(Double($0) / Double(size), 1.0) } ?? 0
+                HStack(spacing: 5) {
+                    Image(systemName: "gauge.medium")
+                        .foregroundStyle(contextColor(used: used, size: size))
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(.quaternary)
+                        .overlay(alignment: .leading) {
+                            GeometryReader { proxy in
+                                Rectangle()
+                                    .fill(contextColor(used: used, size: size))
+                                    .frame(width: max(0, proxy.size.width * ratio))
+                            }
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 2))
+                        .frame(width: 56, height: 5)
+                        .opacity(used == nil ? 0.35 : 1)
+                    Text(used.map { "\(ModelBadgeView.compact($0)) / \(ModelBadgeView.compact(size)) tokens" }
+                         ?? "\(ModelBadgeView.compact(size)) token window")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption2)
+                .help(used == nil
+                      ? "The model's context window. Usage is counted once the transcript is measured."
+                      : "Context used by this session against the model's window. Older history compresses automatically as it fills.")
+            }
+            if engine?.isCompacting == true {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Compressing history…")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text("Return to send · Shift-Return for a new line")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    // MARK: - Actions
 
     private func submit() {
         let text = draft

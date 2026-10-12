@@ -25,6 +25,14 @@ struct ToolStep: Identifiable, Codable, Equatable, Sendable {
         case failed
         /// The turn was stopped while this step was in flight.
         case cancelled
+
+        /// Whether the step will not change state again on its own.
+        var isTerminal: Bool {
+            switch self {
+            case .denied, .done, .failed, .cancelled: true
+            default: false
+            }
+        }
     }
 
     let id: UUID
