@@ -17,6 +17,7 @@ AFM Code is a SwiftUI desktop app that runs large language models locally on you
 - **Vision support** — Paste or drag images into the chat input; vision-capable models (GPT-4o, Claude, Qwen3-VL, Gemma 4) can see them.
 - **Model picker** — Choose between AFM models and downloaded MLX models per session.
 - **Appearance settings** — Chat bubble styles, 15 color palettes, gradient backgrounds per model.
+- **VoiceOver support** — Full screen-reader parity with Perspective Intelligence: every message, sidebar row, model card, and status reads cleanly, with turn-lifecycle announcements and user-togglable preferences.
 
 ## Architecture
 
@@ -127,6 +128,7 @@ Browse and download models in **Settings → Models**.
 | 8 | Chat UI from Perspective Intelligence (bubbles, input, model picker) |
 | 8b | Project picker folder creation (`canCreateDirectories = true`) |
 | 9 | Vision/attachment support (paste/drag images, preview chips, message bubbles) |
+| 10 | VoiceOver parity with Perspective Intelligence (message labels, turn announcements, settings) |
 
 ## Privacy
 
