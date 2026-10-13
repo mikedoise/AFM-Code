@@ -1,5 +1,6 @@
 import Foundation
 import FoundationModels
+import ImageIO
 import MLXFoundationModels
 import Observation
 import OSLog
@@ -300,7 +301,17 @@ final class SessionEngine {
 
     // MARK: - Sending
 
+    /// Send a text-only message (existing API).
     func send(_ text: String) {
+        send(text, images: [])
+    }
+
+    /// Send a message with optional image attachments (vision support).
+    /// Images are embedded into the message record and passed to the
+    /// model using `VisionUserMessage` (AFM) or `Transcript.ImageAttachment`
+    /// (MLX).  The image data is stored in the `Message` model so it
+    /// persists with the transcript.
+    func send(_ text: String, images: [(data: Data, filename: String)]) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // Also while a compaction pass is rebuilding the session — a
         // send mid-rebuild would race the rebuild.
@@ -312,7 +323,7 @@ final class SessionEngine {
             return
         }
 
-        persistUserMessage(trimmed)
+        persistUserMessage(trimmed, images: images)
         ensureLanguageModelSession()
         guard languageModelSession != nil else {
             state = .error("Could not start the model session.")
@@ -325,7 +336,7 @@ final class SessionEngine {
         state = .responding
         streamingText = ""
         sendTask = Task { [weak self] in
-            await self?.runTurn(prompt: trimmed)
+            await self?.runTurn(prompt: trimmed, images: images)
         }
     }
 
@@ -333,7 +344,7 @@ final class SessionEngine {
         sendTask?.cancel()
     }
 
-    private func runTurn(prompt: String) async {
+    private func runTurn(prompt: String, images: [(data: Data, filename: String)] = []) async {
         guard languageModelSession != nil else { return }
 
         // Measure against the model's real window before sending, so a
@@ -345,7 +356,7 @@ final class SessionEngine {
         var attempt = 0
         while true {
             attempt += 1
-            let needsCompaction = await attemptTurn(prompt: prompt)
+            let needsCompaction = await attemptTurn(prompt: prompt, images: images)
             // The turn died because the transcript is unusable (a
             // full window, or content the model can't read). Compress
             // aggressively, then re-run the same prompt against the
@@ -383,7 +394,10 @@ final class SessionEngine {
     /// Runs one model response for `prompt` and reports whether it
     /// failed with a context-size error that a compaction pass could
     /// fix (the caller may then compact and retry).
-    private func attemptTurn(prompt: String) async -> Bool {
+    ///
+    /// Phase 9: when `images` is non-empty, image attachments are added
+    /// to the transcript before sending so vision-capable models can see them.
+    private func attemptTurn(prompt: String, images: [(data: Data, filename: String)] = []) async -> Bool {
         guard let languageModelSession else { return false }
         if sessionHasTools {
             toolContext?.beginTurn()
@@ -398,6 +412,13 @@ final class SessionEngine {
         }
 
         do {
+            // Phase 9: if images are attached, add them to the session's
+            // transcript before sending so vision-capable models can see them.
+            if !images.isEmpty {
+                var mutableTranscript = languageModelSession.transcript
+                appendImageAttachments(to: &mutableTranscript, images: images)
+                languageModelSession.transcript = mutableTranscript
+            }
             let stream = languageModelSession.streamResponse(to: Prompt(prompt), options: options)
             for try await snapshot in stream {
                 streamingText = snapshot.content
@@ -467,6 +488,31 @@ final class SessionEngine {
         }
     }
 
+    // MARK: - Vision
+
+    /// Append image attachments to the session's transcript before
+    /// sending.  The Apple Foundation Models SDK expects images to be
+    /// wrapped in a `Transcript.Segment.attachment` containing a
+    /// `Transcript.ImageAttachment`.
+    private func appendImageAttachments(to mutableTranscript: inout Transcript, images: [(data: Data, filename: String)]) {
+        var segments: [Transcript.Segment] = []
+        for imageEntry in images {
+            guard let cgImage = Self.cgImage(from: imageEntry.data) else { continue }
+            let label = imageEntry.filename.isEmpty ? nil : (imageEntry.filename as NSString).deletingPathExtension
+            let imageAttachment = Transcript.ImageAttachment(cgImage, orientation: .up)
+            segments.append(.attachment(.init(content: .image(imageAttachment), label: label)))
+        }
+        if !segments.isEmpty {
+            mutableTranscript.append(.prompt(.init(segments: segments)))
+        }
+    }
+
+    /// Decode raw image data (PNG, JPEG, etc.) into a `CGImage`.
+    private static func cgImage(from data: Data) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
+
     // MARK: - Persistence
 
     /// Link a message to this session on *both* sides of the
@@ -517,7 +563,18 @@ final class SessionEngine {
     }
 
     private func persistUserMessage(_ text: String) {
+        persistUserMessage(text, images: [])
+    }
+
+    /// Phase 9: persist a user message with optional image attachments.
+    /// The image data is stored in the Message model so it persists
+    /// with the transcript and can be re-sent on session resume.
+    private func persistUserMessage(_ text: String, images: [(data: Data, filename: String)]) {
         let message = Message(role: .user, content: text)
+        if let firstImage = images.first {
+            message.imageData = firstImage.data
+            message.imageFilename = firstImage.filename
+        }
         attach(message)
         session.setInitialTitle(from: text)
         try? modelContext.save()

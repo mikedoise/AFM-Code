@@ -7,12 +7,18 @@ import SwiftUI
 ///
 /// Key handling: Return sends, Shift-Return inserts a line break
 /// (handled inside `ChatInputTextView`).
+///
+/// Vision support: images pasted into the text view are staged as
+/// `PendingImageAttachment` objects and rendered as preview chips
+/// above the input.  They are embedded into the sent message and
+/// discarded after submission.
 struct ComposerView: View {
     let session: ChatSession
     let engine: SessionEngine?
 
     @Environment(ModelCatalog.self) private var catalog
     @State private var draft = ""
+    @State private var pendingImages: [PendingImageAttachment] = []
     @State private var prewarmTask: Task<Void, Never>?
     @FocusState private var isFocused: Bool
 
@@ -40,6 +46,22 @@ struct ComposerView: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                         .lineLimit(2)
+                }
+
+                // Image preview chips (vision support)
+                if !pendingImages.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(pendingImages) { attachment in
+                                ImageAttachmentPreviewCard(
+                                    attachment: attachment
+                                ) {
+                                    pendingImages.removeAll { $0.id == attachment.id }
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 130)
                 }
 
                 messageInputField
@@ -81,7 +103,12 @@ struct ComposerView: View {
                 placeholder: "Ask AFM Code…",
                 isDisabled: model?.isAvailable == false,
                 accessibilityLabel: "Message AFM Code",
-                onSubmit: { _ in submit() }
+                onSubmit: { _ in submit() },
+                onImagePaste: { images in
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        pendingImages.append(contentsOf: images)
+                    }
+                }
             )
             .focused($isFocused)
 
@@ -181,8 +208,10 @@ struct ComposerView: View {
 
     private func submit() {
         let text = draft
+        let images = pendingImages
         draft = ""
-        engine?.send(text)
+        pendingImages.removeAll()
+        engine?.send(text, images: images.map { ($0.jpegData, $0.suggestedFilename) })
     }
 
     private func contextColor(used: Int?, size: Int) -> Color {

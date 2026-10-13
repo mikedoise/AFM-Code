@@ -29,6 +29,11 @@ final class Message {
     /// `ModelDescriptor.id` of the model that produced this message
     /// (assistant messages) — the bubble's gradient identity.
     var modelID: String?
+    /// JPEG image data attached to user messages (vision support).
+    var imageData: Data?
+    /// Filename for the attached image (used to derive a suggested name
+    /// when the image was pasted or dropped).
+    var imageFilename: String?
     var session: ChatSession?
 
     init(role: Role, content: String) {

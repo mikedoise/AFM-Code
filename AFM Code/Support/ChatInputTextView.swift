@@ -2,13 +2,16 @@
 //  ChatInputTextView.swift
 //  AFM Code
 //
-//  Native chat input, ported from Perspective Intelligence. The
-//  attachment staging flow that PI routes pastes through is not part
-//  of AFM Code yet; plain text paste behaves normally.
+//  Native chat input with vision support.  When the user pastes an
+//  image (Cmd+V) the pasteboard is inspected for image data before
+//  falling through to normal text paste.  Detected images are routed
+//  through `onImagePaste` so the composer can stage them as preview
+//  chips.
 //
 
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ChatInputTextView: NSViewRepresentable {
     @Binding var text: String
@@ -17,9 +20,13 @@ struct ChatInputTextView: NSViewRepresentable {
     var accessibilityLabel: String? = nil
     var accessibilityHint: String = "Enter the message to send"
     var onSubmit: ((String) -> Void)?
+    /// Called when the pasteboard contains image data.  The composer
+    /// receives the array and stages preview chips.
+    var onImagePaste: (([PendingImageAttachment]) -> Void)?
 
     func makeNSView(context: Context) -> FocusForwardingScrollView {
-        let textView = PlaceholderTextView()
+        let textView = PasteAwareTextView()
+        textView.onImagePaste = onImagePaste
         textView.placeholderString = placeholder
         textView.delegate = context.coordinator
         textView.isRichText = false
@@ -52,7 +59,7 @@ struct ChatInputTextView: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: FocusForwardingScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? PlaceholderTextView else { return }
+        guard let textView = scrollView.documentView as? PasteAwareTextView else { return }
         context.coordinator.parent = self
         let shouldPreserveUnpublishedEdit = context.coordinator.hasUnpublishedEdit
             && text == context.coordinator.lastPublishedText
@@ -64,6 +71,7 @@ struct ChatInputTextView: NSViewRepresentable {
         }
         textView.isEditable = !isDisabled
         textView.isSelectable = true
+        textView.onImagePaste = onImagePaste
         textView.placeholderString = placeholder
         textView.configureAccessibility(
             label: accessibilityLabel ?? placeholder,
@@ -77,7 +85,7 @@ struct ChatInputTextView: NSViewRepresentable {
         context: Context
     ) -> CGSize? {
         MainActor.assumeIsolated {
-            guard let textView = nsView.documentView as? PlaceholderTextView,
+            guard let textView = nsView.documentView as? PasteAwareTextView,
                   let textContainer = textView.textContainer else { return nil }
 
             let width = proposal.width ?? 200
@@ -111,7 +119,7 @@ struct ChatInputTextView: NSViewRepresentable {
 
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ChatInputTextView
-        weak var textView: PlaceholderTextView?
+        weak var textView: PasteAwareTextView?
         fileprivate var lastPublishedText: String
         fileprivate var hasUnpublishedEdit = false
         private var pendingBindingUpdate: DispatchWorkItem?
@@ -126,13 +134,13 @@ struct ChatInputTextView: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
-            guard let textView = notification.object as? PlaceholderTextView else { return }
+            guard let textView = notification.object as? PasteAwareTextView else { return }
             scheduleBindingUpdate(textView.string)
             textView.needsDisplay = true
         }
 
         func textDidEndEditing(_ notification: Notification) {
-            guard let textView = notification.object as? PlaceholderTextView else { return }
+            guard let textView = notification.object as? PasteAwareTextView else { return }
             flushBindingUpdate(textView.string)
         }
 
@@ -185,11 +193,11 @@ struct ChatInputTextView: NSViewRepresentable {
                         textView.insertNewlineIgnoringFieldEditor(nil)
                         return true
                     }
-                    guard let placeholderTextView = textView as? PlaceholderTextView else {
+                    guard let pasteAwareTextView = textView as? PasteAwareTextView else {
                         return false
                     }
-                    flushBindingUpdate(placeholderTextView.string)
-                    let submittedText = placeholderTextView.string
+                    flushBindingUpdate(pasteAwareTextView.string)
+                    let submittedText = pasteAwareTextView.string
                     let submit = parent.onSubmit
                     DispatchQueue.main.async {
                         submit?(submittedText)
@@ -213,7 +221,11 @@ struct ChatInputTextView: NSViewRepresentable {
         }
     }
 
-    class PlaceholderTextView: NSTextView {
+    /// NSTextView that intercepts paste to detect images on the
+    /// pasteboard before falling through to normal text paste.
+    /// Mirrors PI's PasteAwareTextView.
+    class PasteAwareTextView: NSTextView {
+        var onImagePaste: (([PendingImageAttachment]) -> Void)?
         var placeholderString: String = ""
 
         func configureAccessibility(label: String, hint: String) {
@@ -221,6 +233,116 @@ struct ChatInputTextView: NSViewRepresentable {
             setAccessibilityLabel(label)
             setAccessibilityHelp(hint)
             setAccessibilityIdentifier(label)
+        }
+
+        override func paste(_ sender: Any?) {
+            guard isEditable else {
+                super.paste(sender)
+                return
+            }
+            let images = imageAttachments(from: .general)
+            if !images.isEmpty {
+                onImagePaste?(images)
+                return
+            }
+            super.paste(sender)
+        }
+
+        override func pasteAsPlainText(_ sender: Any?) {
+            guard isEditable else {
+                super.pasteAsPlainText(sender)
+                return
+            }
+            let images = imageAttachments(from: .general)
+            if !images.isEmpty {
+                onImagePaste?(images)
+                return
+            }
+            super.pasteAsPlainText(sender)
+        }
+
+        /// Extract images from the pasteboard.  Returns an empty array
+        /// when no image data is found so normal text paste proceeds.
+        private func imageAttachments(from pb: NSPasteboard) -> [PendingImageAttachment] {
+            let types = pb.types ?? []
+
+            // File URLs (dragged or copied files)
+            if types.contains(where: { $0.rawValue == "public.file-url" }),
+               let urls = pb.readObjects(forClasses: [NSURL.self], options: [
+                   .urlReadingFileURLsOnly: true
+               ]) as? [URL], !urls.isEmpty {
+                return urls.compactMap { url -> PendingImageAttachment? in
+                    guard let data = try? Data(contentsOf: url),
+                          let attachment = PendingImageAttachment.from(
+                              pasteboardData: data,
+                              suggestedFilename: url.lastPathComponent,
+                              contentTypeIdentifier: UTType(filenameExtension: url.pathExtension)?.identifier ?? UTType.jpeg.identifier)
+                    else { return nil }
+                    return attachment
+                }
+            }
+
+            // Direct PNG / TIFF data from clipboard
+            if let pngData = pb.data(forType: .png), !pngData.isEmpty,
+               let attachment = PendingImageAttachment.from(
+                   pasteboardData: pngData,
+                   suggestedFilename: "Pasted Image.png",
+                   contentTypeIdentifier: UTType.png.identifier) {
+                return [attachment]
+            }
+
+            if let tiffData = pb.data(forType: .tiff), !tiffData.isEmpty,
+               let attachment = PendingImageAttachment.from(
+                   pasteboardData: tiffData,
+                   suggestedFilename: "Pasted Image.tiff",
+                   contentTypeIdentifier: UTType.tiff.identifier) {
+                return [attachment]
+            }
+
+            // Fallback: NSImage from pasteboard → convert to PNG
+            guard let image = NSImage(pasteboard: pb),
+                  image.isValid,
+                  image.size.width > 0,
+                  image.size.height > 0 else {
+                return []
+            }
+
+            let pixelWidth = Int(image.size.width)
+            let pixelHeight = Int(image.size.height)
+            guard let bitmapRep = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: pixelWidth,
+                pixelsHigh: pixelHeight,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            ) else { return [] }
+
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmapRep)
+            image.draw(
+                in: NSRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight),
+                from: .zero,
+                operation: .copy,
+                fraction: 1.0
+            )
+            NSGraphicsContext.restoreGraphicsState()
+
+            guard let pngData = bitmapRep.representation(using: .png, properties: [:]),
+                  !pngData.isEmpty else {
+                return []
+            }
+
+            return [PendingImageAttachment(
+                id: UUID(),
+                jpegData: pngData,
+                suggestedFilename: "Pasted Image.png",
+                contentTypeIdentifier: UTType.png.identifier
+            )]
         }
 
         override func draw(_ dirtyRect: NSRect) {

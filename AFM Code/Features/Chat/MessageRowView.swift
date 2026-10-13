@@ -9,6 +9,10 @@ import SwiftUI
 struct MessageRowView: View {
     let role: Message.Role
     let content: String
+    /// Phase 9: JPEG image data attached to user messages.
+    let imageData: Data?
+    /// Phase 9: filename for the attached image.
+    let imageFilename: String?
     var isStreaming: Bool = false
     /// Chain of thought (reasoning models); renders the thinking card.
     var thinking: String? = nil
@@ -35,6 +39,8 @@ struct MessageRowView: View {
     init(message: Message, modelID: String? = nil) {
         self.role = message.role
         self.content = message.content
+        self.imageData = message.imageData
+        self.imageFilename = message.imageFilename
         self.thinking = message.thinkingContent
         self.steps = message.toolActivity
         self.modelID = message.modelID ?? modelID
@@ -55,6 +61,8 @@ struct MessageRowView: View {
     ) {
         self.role = role
         self.content = content
+        self.imageData = nil
+        self.imageFilename = nil
         self.isStreaming = isStreaming
         self.thinking = thinking
         self.steps = steps
@@ -80,6 +88,11 @@ struct MessageRowView: View {
     private var hasThinking: Bool {
         guard let thinking else { return false }
         return !thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Phase 9: whether this message has an attached image.
+    private var hasImage: Bool {
+        imageData != nil && !imageData!.isEmpty
     }
 
     // MARK: - Body
@@ -118,22 +131,30 @@ struct MessageRowView: View {
         }
     }
 
+    /// Phase 9: user bubble that may include an attached image.
     private var userBubble: some View {
-        userText
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background {
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.0, green: 0.48, blue: 1.0),
-                        Color(red: 0.0, green: 0.42, blue: 0.92)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+        VStack(alignment: .trailing, spacing: 8) {
+            // Image preview (if any)
+            if hasImage, let imageData {
+                AttachedImageView(imageData: imageData, filename: imageFilename ?? "image")
+                    .frame(maxWidth: 400)
             }
-            .clipShape(RoundedBubbleShape(isFromUser: true))
-            .shadow(color: .black.opacity(0.08), radius: 2, x: 0, y: 1)
+            userText
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background {
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.0, green: 0.48, blue: 1.0),
+                            Color(red: 0.0, green: 0.42, blue: 0.92)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                }
+                .clipShape(RoundedBubbleShape(isFromUser: true))
+                .shadow(color: .black.opacity(0.08), radius: 2, x: 0, y: 1)
+        }
     }
 
     /// User messages are short — the lightweight inline renderer with
