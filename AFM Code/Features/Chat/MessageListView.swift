@@ -46,6 +46,9 @@ struct MessageListView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(.orange.opacity(0.1))
                             .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("Error")
+                            .accessibilityValue(error)
                     }
                 }
                 .padding(24)
@@ -108,6 +111,7 @@ struct MessageListView: View {
                     .buttonStyle(.plain)
                     .padding(.bottom, 16)
                     .help("Scroll to latest")
+                    .accessibilityLabel("Scroll to latest message")
                 }
             }
         }

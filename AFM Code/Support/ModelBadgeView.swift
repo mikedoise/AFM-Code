@@ -11,6 +11,7 @@ struct ModelBadgeView: View {
                 Circle()
                     .fill(.green)
                     .frame(width: 7, height: 7)
+                    .accessibilityHidden(true)
                 Text(model.displayName)
                     .font(.caption.weight(.medium))
                 if let contextSize = model.contextSize {
@@ -21,11 +22,20 @@ struct ModelBadgeView: View {
             }
             .lineLimit(1)
             .help(Self.helpText(for: model))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(
+                model.contextSize.map {
+                    "Active model \(model.displayName), \(Self.compact($0)) token context"
+                } ?? "Active model \(model.displayName)"
+            )
         } else if let detail = catalog.descriptors.first?.availabilityDetail {
             Label(detail, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(.orange)
                 .lineLimit(2)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Model unavailable")
+                .accessibilityValue(detail)
         }
     }
 

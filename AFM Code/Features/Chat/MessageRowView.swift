@@ -95,12 +95,53 @@ struct MessageRowView: View {
         imageData != nil && !imageData!.isEmpty
     }
 
+    /// Who spoke, for the bubble's `accessibilityLabel`.
+    ///
+    /// VoiceOver reads label + value as "You, [message]" / "[model],
+    /// [reply]", so the speaker must be a spoken name: the on-device
+    /// models get fixed titles; MLX models read their repository name
+    /// ("mlx:mlx-community/Qwen3-4B-4bit" → "Qwen3-4B-4bit").
+    private var speakerName: String {
+        switch role {
+        case .user:
+            return "You"
+        case .assistant:
+            guard let modelID else { return "Assistant" }
+            switch modelID {
+            case "afm-core":
+                return "On-device model"
+            case "afm-core-advanced":
+                return "Advanced on-device model"
+            case let id where id.hasPrefix("mlx:"):
+                let repoID = String(id.dropFirst("mlx:".count))
+                let name = (repoID as NSString).lastPathComponent
+                return name.isEmpty ? "Assistant" : name
+            default:
+                return "Assistant"
+            }
+        }
+    }
+
+    /// The message text as VoiceOver should read it: the raw content
+    /// (newlines are fine for `accessibilityValue`).
+    private var messageValue: String {
+        let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? "\(isStreaming ? "Still working…" : "Empty message")" : text
+    }
+
     // MARK: - Body
 
     var body: some View {
         Group {
             if role == .user {
                 userLayout
+                    // One element per message — the bubble, timestamp,
+                    // and avatar collapse so VoiceOver reads "You, [text]"
+                    // without extra flick targets.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(speakerName)
+                    .accessibilityValue(messageValue)
+                    .accessibilityAddTraits(isStreaming ? .updatesFrequently : [])
             } else {
                 assistantLayout
             }
@@ -267,6 +308,14 @@ struct MessageRowView: View {
                     usesModelGradient: bubbleStyle.usesModelColors
                 )
                 .equatable()
+                // Collapse the rendered markdown (headers, code blocks,
+                // tables) into one element: "[model name], [reply text]".
+                // The thinking card and steps disclosure sit outside
+                // this element and keep their own accessibility.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(speakerName)
+                .accessibilityValue(messageValue)
+                .accessibilityAddTraits(isStreaming ? .updatesFrequently : [])
             }
             if let steps, !steps.isEmpty {
                 StepsDisclosureCard(
@@ -303,6 +352,7 @@ struct MessageRowView: View {
             Text(timestamp, format: .dateTime.hour().minute())
                 .font(.caption2)
                 .foregroundStyle(Color.platformTertiaryLabel)
+                .accessibilityLabel("Message timestamp")
             Spacer(minLength: 0)
             Button(action: copyMessage) {
                 Image(systemName: showingCopyConfirmation ? "checkmark" : "doc.on.doc")
@@ -311,7 +361,13 @@ struct MessageRowView: View {
             }
             .buttonStyle(.plain)
             .help(showingCopyConfirmation ? "Copied" : "Copy message")
+            .accessibilityLabel(showingCopyConfirmation ? "Copied" : "Copy message")
         }
+        // Under the bubble: timestamp + copy are the row's only
+        // metadata. Hide them from VoiceOver — the bubble element
+        // above already carries the full message, and the copy is a
+        // custom action on it.
+        .accessibilityHidden(true)
     }
 
     // MARK: - Actions
@@ -319,6 +375,7 @@ struct MessageRowView: View {
     private func copyMessage() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(content, forType: .string)
+        VoiceOverAnnouncer.announce("Message copied to clipboard")
         withAnimation(.easeInOut(duration: 0.2)) {
             showingCopyConfirmation = true
         }

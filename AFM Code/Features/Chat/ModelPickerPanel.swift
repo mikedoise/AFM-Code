@@ -242,6 +242,37 @@ private struct ModelPickerCard: View {
             )
         }
         .buttonStyle(.plain)
+        // One element per model: name, availability note, download
+        // progress, and selection state — "Gemma 4, Available, 80
+        // percent downloaded, selected".
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(cardAccessibilityLabel)
+        .accessibilityValue(cardAccessibilityValue)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private var cardAccessibilityLabel: String {
+        var parts: [String] = [title]
+        if let statusIcon {
+            switch statusIcon {
+            case "checkmark.circle.fill":
+                parts.append("selected")
+            case "exclamationmark.triangle.fill":
+                parts.append("not available")
+            case "icloud.and.arrow.down":
+                parts.append("needs download")
+            default:
+                break // icon is decorative; the value carries the detail
+            }
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private var cardAccessibilityValue: String {
+        var parts: [String] = [subtitle]
+        if let downloadFraction, !isSelected {
+            parts.append("\(Int((downloadFraction * 100).rounded())) percent downloaded")
+        }
+        return parts.joined(separator: ", ")
     }
 }

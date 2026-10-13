@@ -276,6 +276,7 @@ private struct ProjectRow: View {
         HStack(spacing: 8) {
             Image(systemName: "folder.fill")
                 .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
             Text(project.name)
                 .font(.body.weight(.medium))
                 .lineLimit(1)
@@ -289,20 +290,43 @@ private struct ProjectRow: View {
             statusDot
         }
         .help("\(project.name) — \(project.folderName)")
+        // One element: "My Project, 3 sessions, folder missing".
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(project.name)
+        .accessibilityValue(accessibilityStatus)
+    }
+
+    private var accessibilityStatus: String {
+        var parts: [String] = []
+        if sessionCount > 0 {
+            parts.append(sessionCount == 1 ? "1 session" : "\(sessionCount) sessions")
+        }
+        switch status {
+        case .active:
+            break // the common case is unremarkable
+        case .folderMissing, .bookmarkInvalid:
+            parts.append("folder missing")
+        case .unknown:
+            parts.append("status unknown")
+        }
+        return parts.joined(separator: ", ")
     }
 
     @ViewBuilder
     private var statusDot: some View {
-        switch status {
-        case .active:
-            Circle().fill(.green).frame(width: 6, height: 6)
-        case .folderMissing, .bookmarkInvalid:
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.caption2)
-                .foregroundStyle(.orange)
-        case .unknown:
-            EmptyView()
+        Group {
+            switch status {
+            case .active:
+                Circle().fill(.green).frame(width: 6, height: 6)
+            case .folderMissing, .bookmarkInvalid:
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            case .unknown:
+                EmptyView()
+            }
         }
+        .accessibilityHidden(true)
     }
 }
 
@@ -323,5 +347,15 @@ struct SessionRow: View {
             }
         }
         .padding(.vertical, 2)
+        // One element: "Fix login bug, [last message preview]".
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(session.title)
+        .accessibilityValue(lastMessagePreview)
+    }
+
+    private var lastMessagePreview: String {
+        guard let last = session.messageList.last else { return "New session" }
+        let text = last.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? "New session" : text
     }
 }

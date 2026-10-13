@@ -18,9 +18,10 @@ struct SettingsView: View {
             modelSection
             mlxSection
             appearanceSection
+            accessibilitySection
         }
         .formStyle(.grouped)
-        .frame(width: 700, height: 620)
+        .frame(width: 700, height: 700)
     }
 
     // MARK: - System prompt
@@ -139,6 +140,42 @@ struct SettingsView: View {
             get: { ChatBubbleStyle(rawValue: bubbleStyleRawValue) ?? ChatBubblePreference.defaultValue },
             set: { bubbleStyleRawValue = $0.rawValue }
         )
+    }
+
+    // MARK: - Accessibility
+
+    private var accessibilitySection: some View {
+        Section {
+            Toggle(
+                isOn: Binding(
+                    get: { settings.announceTypingWithVoiceOver },
+                    set: { settings.announceTypingWithVoiceOver = $0 }
+                )
+            ) {
+                LabeledContent("Announce activity") {
+                    Text("Medium priority")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .help("Spoken (when VoiceOver is running) when the model starts working, or when a change is waiting for your approval.")
+
+            Toggle(
+                isOn: Binding(
+                    get: { settings.announceMessagesWithVoiceOver },
+                    set: { settings.announceMessagesWithVoiceOver = $0 }
+                )
+            ) {
+                LabeledContent("Announce replies") {
+                    Text("High priority")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .help("Spoken (when VoiceOver is running) when a reply finishes, so you know the text is final.")
+        } header: {
+            Text("VoiceOver")
+        } footer: {
+            Text("Announcements are only heard when VoiceOver is running; they have no effect for sighted users. The streaming reply itself is always readable in VoiceOver — announcements just mark the start and end of a turn.")
+        }
     }
 
     private func backgroundSwatch(_ style: ChatBackgroundStyle) -> some View {

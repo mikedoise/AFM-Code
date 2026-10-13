@@ -21,6 +21,7 @@ struct StepsDisclosureCard: View {
     }
 
     @State private var isExpanded = false
+    @Environment(AppSettings.self) private var settings
 
     private var pendingStep: ToolStep? {
         steps.last { $0.status == .awaiting && (approvals?.pendingStepIDs.contains($0.id) ?? false) }
@@ -69,9 +70,19 @@ struct StepsDisclosureCard: View {
                     .fill(Color.platformSeparator.opacity(0.08))
             }
         }
-        .onChange(of: pendingStep?.id) {
+        .onChange(of: pendingStep?.id) { oldID, newID in
             if pendingStep != nil {
                 isExpanded = true
+            }
+            // A new approval request appeared: the decision must be
+            // heard, not just seen.  History rows carry no approval
+            // service, so this only ever fires on the live row.
+            if newID != nil, oldID == nil,
+               settings.announceTypingWithVoiceOver {
+                let title = pendingStep?.title ?? "A change"
+                VoiceOverAnnouncer.announceImportant(
+                    "\(title) is waiting for your approval"
+                )
             }
         }
     }

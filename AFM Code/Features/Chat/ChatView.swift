@@ -36,6 +36,7 @@ struct ChatView: View {
         .background {
             ChatWindowBackground()
         }
+        .accessibilityTurnAnnouncements(engine: engine, settings: settings)
         .navigationTitle("")
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -62,6 +63,14 @@ struct ChatView: View {
     }
 
     // MARK: - Title model picker
+
+    /// The title + model name as one spoken phrase: "Fix login bug, On-
+    /// device model. Double-tap to choose the model."
+    private var accessibilityTitle: String {
+        let title = session.title.isEmpty ? "Chat" : session.title
+        let model = (engine?.activeModel ?? catalog.activeDescriptor)?.displayName
+        return model.map { "\(title), \($0)" } ?? title
+    }
 
     private var titleModelPickerButton: some View {
         Button {
@@ -104,7 +113,7 @@ struct ChatView: View {
         .buttonStyle(.plain)
         .help("Choose the model for this session")
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Choose model")
+        .accessibilityLabel(accessibilityTitle)
         .accessibilityHint("Shows the model picker")
         .accessibilityAddTraits([.isHeader, .isButton])
         .accessibilityAction(.default) {

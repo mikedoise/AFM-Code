@@ -187,20 +187,33 @@ struct ComposerView: View {
                 .help(used == nil
                       ? "The model's context window. Usage is counted once the transcript is measured."
                       : "Context used by this session against the model's window. Older history compresses automatically as it fills.")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(
+                    used.map {
+                        "Context: \(ModelBadgeView.compact($0)) of \(ModelBadgeView.compact(size)) tokens used"
+                    } ?? "Context window: \(ModelBadgeView.compact(size)) tokens"
+                )
             }
             if engine?.isCompacting == true {
                 HStack(spacing: 4) {
                     ProgressView()
                         .controlSize(.small)
+                        .accessibilityHidden(true)
                     Text("Compressing history…")
                 }
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Compressing history")
+                .accessibilityAddTraits(.updatesFrequently)
             }
             Spacer()
             Text("Return to send · Shift-Return for a new line")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+                // Keyboard hint for sighted users; VoiceOver users
+                // activate the send button directly.
+                .accessibilityHidden(true)
         }
     }
 
