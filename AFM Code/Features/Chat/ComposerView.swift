@@ -17,10 +17,14 @@ struct ComposerView: View {
     let engine: SessionEngine?
 
     @Environment(ModelCatalog.self) private var catalog
-    @State private var draft = ""
+    /// The draft, owned by `ChatView` so the keyboard commands can guard
+    /// on it (regeneration refuses to swallow an unsent draft).
+    @Binding var draft: String
     @State private var pendingImages: [PendingImageAttachment] = []
     @State private var prewarmTask: Task<Void, Never>?
-    @FocusState private var isFocused: Bool
+    /// Focus, owned by `ChatView` so ⌘L can drive it and the ⌘⌫ delete
+    /// guard can read it.
+    var focus: FocusState<Bool>.Binding
 
     private var model: ModelDescriptor? { engine?.activeModel ?? catalog.activeDescriptor }
 
@@ -72,9 +76,9 @@ struct ComposerView: View {
             .padding(.vertical, 10)
         }
         .onAppear {
-            isFocused = true
+            focus.wrappedValue = true
         }
-        .onChange(of: isFocused) { _, focused in
+        .onChange(of: focus.wrappedValue) { _, focused in
             if focused {
                 engine?.prewarm()
             }
@@ -110,7 +114,7 @@ struct ComposerView: View {
                     }
                 }
             )
-            .focused($isFocused)
+            .focused(focus)
 
             sendButton
         }
@@ -123,7 +127,7 @@ struct ComposerView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(
-                    isFocused ? Color.platformSeparator.opacity(0.5) : Color.platformSeparator.opacity(0.3),
+                    focus.wrappedValue ? Color.platformSeparator.opacity(0.5) : Color.platformSeparator.opacity(0.3),
                     lineWidth: 1
                 )
         )

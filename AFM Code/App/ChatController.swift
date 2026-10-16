@@ -58,6 +58,42 @@ final class ChatController {
         }
     }
 
+    // MARK: - Command-facing accessors
+
+    /// The selected session, when the detail pane shows one.
+    var selectedSessionID: UUID? {
+        if case .session(let id)? = selection { return id }
+        return nil
+    }
+
+    /// True while the session's engine is mid-turn (responding or
+    /// compacting) — the ⌘. Stop command's enabled state. A session
+    /// whose ChatView has never appeared has no cached engine and so
+    /// is not responding.
+    func isResponding(forSessionID id: UUID) -> Bool {
+        engines[id]?.isBusy == true
+    }
+
+    /// ⌘. — cancel the in-flight turn of a session whose engine is
+    /// cached in this window.
+    func stopResponse(forSessionID id: UUID) {
+        engines[id]?.cancel()
+    }
+
+    /// ⌘N — create a session in the selected project and select it.
+    /// No-ops (and reports `nil`) unless a project is selected.
+    @discardableResult
+    func createSessionInSelectedProject() -> ChatSession? {
+        guard case .project(let projectID) = selection else { return nil }
+        let context = ModelContainerProvider.container.mainContext
+        let predicate = #Predicate<Project> { $0.id == projectID }
+        guard let project = try? context.fetch(FetchDescriptor(predicate: predicate)),
+              let project = project.first else { return nil }
+        let session = ChatSession.create(in: project, context: context)
+        selection = .session(session.id)
+        return session
+    }
+
     /// Clear the persisted selection when it no longer matches anything
     /// (the item was removed, or the window's data changed).
     func validateSelection(projects: [Project], sessions: [ChatSession]) {

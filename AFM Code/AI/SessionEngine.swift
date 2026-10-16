@@ -344,6 +344,56 @@ final class SessionEngine {
         sendTask?.cancel()
     }
 
+    /// ⌘R — re-run the last user turn in place of its answer, the way
+    /// Perspective Intelligence's regeneration works: the final exchange
+    /// (the prompt and everything that answered it) is removed from the
+    /// message list and the framework transcript, the model session is
+    /// dropped so it stops seeing that turn, and the prompt is sent
+    /// again as a fresh turn. Returns `false` when there is nothing to
+    /// regenerate, or a turn is still in flight.
+    @discardableResult
+    func regenerate() -> Bool {
+        guard !isBusy, !isCompacting else { return false }
+        let messages = session.messageList
+        guard let userIndex = messages.lastIndex(where: { $0.role == .user }) else {
+            return false
+        }
+        let prompt = messages[userIndex].content
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return false }
+
+        // Remove the exchange from the persisted message list…
+        let kept = messages[..<userIndex]
+        for message in messages[userIndex...] {
+            modelContext.delete(message)
+        }
+        session.messages = Array(kept)
+
+        // …and from the framework transcript, so a resumed model session
+        // doesn't still see the turn we just dropped.
+        if let data = session.transcriptData,
+           let transcript = try? JSONDecoder().decode(Transcript.self, from: data) {
+            var entries = Array(transcript)
+            if let promptIndex = entries.lastIndex(where: {
+                if case .prompt = $0 { return true }
+                return false
+            }) {
+                entries.removeSubrange(promptIndex...)
+            }
+            var rebuilt = Transcript()
+            rebuilt.append(contentsOf: entries)
+            session.transcriptData = try? JSONEncoder().encode(rebuilt)
+        }
+
+        // Drop the live session; the next send rebuilds it from the
+        // trimmed transcript with fresh instructions.
+        languageModelSession = nil
+        try? modelContext.save()
+
+        send(prompt)
+        return true
+    }
+
     private func runTurn(prompt: String, images: [(data: Data, filename: String)] = []) async {
         guard languageModelSession != nil else { return }
 

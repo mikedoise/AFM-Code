@@ -60,6 +60,7 @@ struct SessionSidebarView: View {
             UserDefaults.standard.set(set.map(\.uuidString), forKey: Self.expandedKey)
         }
         .navigationTitle("AFM Code")
+        .focusedSceneValue(\.afmListCommands, listCommands)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -122,6 +123,32 @@ struct SessionSidebarView: View {
                 .padding(10)
                 .background(.bar)
         }
+    }
+
+    /// What the "Sessions" menu can do with the selection: delete the
+    /// selected session, with the confirmation dialog owned here. The
+    /// deletion itself — engine drop, relationship cleanup, model
+    /// delete — runs in `removeSession`, exactly as from the context menu.
+    ///
+    /// The closure re-resolves the selection at invocation: the value
+    /// is republished only when `canDelete` flips, so it must never
+    /// rely on a snapshot captured when it was built.
+    private var listCommands: SessionListCommands {
+        let canDelete: Bool
+        if case .session(let id)? = selection {
+            canDelete = sessions.contains { $0.id == id }
+        } else {
+            canDelete = false
+        }
+        return SessionListCommands(
+            canDeleteSelectedSession: canDelete,
+            deleteSelectedSession: {
+                guard case .session(let id) = selection else { return }
+                let predicate = #Predicate<ChatSession> { $0.id == id }
+                guard let session = try? modelContext.fetch(FetchDescriptor(predicate: predicate)).first else { return }
+                removingSession = session
+            }
+        )
     }
 
     // MARK: - Session row

@@ -55,6 +55,44 @@ struct RootView: View {
                 Task { await catalog.probe() }
             }
         }
+        .focusedSceneValue(\.afmSceneCommands, sceneCommands)
+    }
+
+    /// What the keyboard commands need from the window: the ordered
+    /// session list (recents and ⌥⌘↑/⌥⌘↓ neighbors), the selection,
+    /// the selected session's turn state, and the ⌘N target. Reading
+    /// `chat`'s tracked state here is what keeps the menu in step —
+    /// selection changes, engine creation, and turn starts all re-render
+    /// this value.
+    private var sceneCommands: SessionSceneCommands {
+        let selectedID = chat.selectedSessionID
+        let selectedIndex = selectedID.flatMap { id in
+            sessions.firstIndex { $0.id == id }
+        }
+        return SessionSceneCommands(
+            recentSessions: sessions.prefix(10).map {
+                .init(id: $0.id, title: $0.title)
+            },
+            selectedSessionID: selectedID,
+            previousSessionID: selectedIndex.flatMap { index in
+                index > 0 ? sessions[index - 1].id : nil
+            },
+            nextSessionID: selectedIndex.flatMap { index in
+                index + 1 < sessions.count ? sessions[index + 1].id : nil
+            },
+            isResponding: selectedID.map { chat.isResponding(forSessionID: $0) } ?? false,
+            canCreateSession: {
+                if case .project = chat.selection { return true }
+                return false
+            }(),
+            selectSession: { chat.selection = .session($0) },
+            stopResponse: {
+                if let selectedID {
+                    chat.stopResponse(forSessionID: selectedID)
+                }
+            },
+            createSession: { chat.createSessionInSelectedProject() }
+        )
     }
 
     @ViewBuilder
