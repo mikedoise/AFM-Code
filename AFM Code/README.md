@@ -18,13 +18,16 @@ AFM Code is a SwiftUI desktop app that runs large language models locally on you
 - **Model picker** — Choose between AFM models and downloaded MLX models per session.
 - **Appearance settings** — Chat bubble styles, 15 color palettes, gradient backgrounds per model.
 - **VoiceOver support** — Full screen-reader parity with Perspective Intelligence: every message, sidebar row, model card, and status reads cleanly, with turn-lifecycle announcements and user-togglable preferences.
+- **Keyboard shortcuts** — The same keystrokes as Perspective Intelligence: stop/regenerate, copy, model picker, composer focus, session navigation, deletion, and recent sessions (see [Keyboard Shortcuts](#keyboard-shortcuts)).
 
 ## Architecture
 
 ```
 AFM Code/
   App/
-    AFMCodeApp.swift              # @main entry, state initialization
+    AFMCodeApp.swift              # @main entry, state initialization, keyboard commands
+    ChatController.swift          # Selection persistence + engine cache
+    ChatCommandContext.swift      # Focused values for the keyboard commands
   Features/
     RootView.swift                  # Sidebar + detail pane layout
     Chat/
@@ -113,6 +116,23 @@ Uses the `mlx-swift-lm-afm` library (vendored fork). Supports:
 
 Browse and download models in **Settings → Models**.
 
+## Keyboard Shortcuts
+
+The same keystrokes Perspective Intelligence provides, adapted to AFM Code's single-window sessions model. All live in the **Sessions** menu and File menu.
+
+| Shortcut | Action |
+|----------|--------|
+| ⌘N | New Session (requires a selected project) |
+| ⌘. | Stop Response (enabled while a turn is in flight) |
+| ⌘R | Regenerate Response (drops the last exchange and re-sends the prompt) |
+| ⇧⌘C | Copy Last Response to the pasteboard |
+| ⌥⇧⌘C | Copy the full conversation to the pasteboard |
+| ⇧⌘M | Choose Model… |
+| ⌘L | Focus the message box |
+| ⌥⌘↑ / ⌥⌘↓ | Previous / Next Session |
+| ⌘⌫ | Delete Session… (skipped while the text view is focused, so ⌘⌫ keeps its default "delete to beginning of line") |
+| ⌘1–⌘9, ⌘0 | Jump to the 1–10 most recent sessions |
+
 ## Phases
 
 | Phase | Description |
@@ -129,6 +149,7 @@ Browse and download models in **Settings → Models**.
 | 8b | Project picker folder creation (`canCreateDirectories = true`) |
 | 9 | Vision/attachment support (paste/drag images, preview chips, message bubbles) |
 | 10 | VoiceOver parity with Perspective Intelligence (message labels, turn announcements, settings) |
+| 11 | Keyboard shortcuts from Perspective Intelligence (Sessions menu: stop, regenerate, copy, model picker, navigation, deletion, recents) |
 
 ## Privacy
 
