@@ -115,6 +115,7 @@ final class ChatController {
         modelContext: ModelContext,
         catalog: ModelCatalog,
         mlx: MLXModelManager,
+        mcp: MCPHostManager,
         workspaces: WorkspaceStore,
         settings: AppSettings
     ) -> SessionEngine {
@@ -126,6 +127,7 @@ final class ChatController {
             modelContext: modelContext,
             catalog: catalog,
             mlx: mlx,
+            mcp: mcp,
             workspaces: workspaces,
             settings: settings
         )

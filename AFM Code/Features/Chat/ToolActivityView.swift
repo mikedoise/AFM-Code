@@ -16,6 +16,12 @@ struct ToolStepView: View {
             && (approvals?.pendingStepIDs.contains(step.id) ?? false)
     }
 
+    /// Commands and MCP tools mutate things the user owns; everything
+    /// else (reads, searches) is approved by construction.
+    private var mutating: Bool {
+        step.kind == .command || step.kind == .mcp
+    }
+
     var body: some View {
         if isAwaiting {
             awaitingCard
@@ -70,18 +76,22 @@ struct ToolStepView: View {
                 Button {
                     decide(.approve)
                 } label: {
-                    Label(step.kind == .command ? "Allow" : "Approve", systemImage: "checkmark")
+                    Label(mutating ? "Allow" : "Approve", systemImage: "checkmark")
                 }
                 .buttonStyle(.borderedProminent)
 
-                if step.kind == .command {
+                if mutating {
                     Button {
                         decide(.alwaysAllow)
                     } label: {
                         Label("Always Allow", systemImage: "hand.raised")
                     }
                     .buttonStyle(.bordered)
-                    .help("Run this exact command without asking again in this project")
+                    .help(
+                        step.kind == .mcp
+                            ? "Allow this MCP tool without asking again in this project"
+                            : "Run this exact command without asking again in this project"
+                    )
                 }
 
                 Spacer()
@@ -154,7 +164,7 @@ struct ToolStepView: View {
 
     @ViewBuilder
     private var payload: some View {
-        if let command = step.command, step.kind == .command, step.detail == nil {
+        if let command = step.command, mutating, step.detail == nil {
             Text(command)
                 .font(.system(.caption2, design: .monospaced))
                 .textSelection(.enabled)

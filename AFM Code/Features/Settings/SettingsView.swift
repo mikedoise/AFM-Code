@@ -7,6 +7,7 @@ struct SettingsView: View {
     @Environment(ModelCatalog.self) private var catalog
     @Environment(\.colorScheme) private var colorScheme
     @State private var showModels = false
+    @State private var showMCP = false
     @AppStorage(ChatBubblePreference.key)
     private var bubbleStyleRawValue = ChatBubblePreference.defaultValue.rawValue
     @AppStorage(ChatBackgroundPreference.key)
@@ -17,6 +18,7 @@ struct SettingsView: View {
             promptSection
             modelSection
             mlxSection
+            mcpSection
             appearanceSection
             accessibilitySection
         }
@@ -99,6 +101,27 @@ struct SettingsView: View {
         }
         .sheet(isPresented: $showModels) {
             ModelsView()
+                .frame(width: 680, height: 640)
+        }
+    }
+
+    // MARK: - MCP servers
+
+    private var mcpSection: some View {
+        Section {
+            Button {
+                showMCP = true
+            } label: {
+                Label("Manage MCP Servers…", systemImage: "server.rack")
+            }
+            .help("Connect Model Context Protocol servers whose tools become available to project sessions.")
+        } header: {
+            Text("MCP Servers")
+        } footer: {
+            Text("Add Model Context Protocol servers (npx, uvx, or any executable) whose tools join the agent's toolset. Each tool call still requires approval, and servers run inside the app sandbox.")
+        }
+        .sheet(isPresented: $showMCP) {
+            MCPServersView()
                 .frame(width: 680, height: 640)
         }
     }

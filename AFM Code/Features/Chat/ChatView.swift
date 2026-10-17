@@ -15,6 +15,7 @@ struct ChatView: View {
 
     @Environment(ModelCatalog.self) private var catalog
     @Environment(MLXModelManager.self) private var mlx
+    @Environment(MCPHostManager.self) private var mcp
     @Environment(ChatController.self) private var chat
     @Environment(WorkspaceStore.self) private var workspaces
     @Environment(AppSettings.self) private var settings
@@ -60,6 +61,7 @@ struct ChatView: View {
                     modelContext: modelContext,
                     catalog: catalog,
                     mlx: mlx,
+                    mcp: mcp,
                     workspaces: workspaces,
                     settings: settings
                 )

@@ -97,6 +97,15 @@ enum AgentInstructions {
     You have no file or shell tools in this session. If you need code, logs, or output that you can't see, ask the user to paste it before asserting specifics.
     """
 
+    /// Appended when any enabled MCP server is offering tools, so the
+    /// model knows the namespaced tools come from outside the project
+    /// and what their results mean.
+    private static let mcpSection = """
+
+    MCP tools:
+    Tools whose names start with mcp__ come from external Model Context Protocol servers the user has enabled, not from the project folder. Their arguments are passed to those servers, and their results describe what the server reported — treat them as server output, not project file contents. They follow the same approval flow as commands: if the user declines one, don't retry it.
+    """
+
     /// Appended when the project is a Git repository. Small models in
     /// particular need to be told the repo is already checked out and
     /// how to inspect it — and its history — without cloning.
@@ -144,7 +153,8 @@ enum AgentInstructions {
         includesTools: Bool,
         project: ProjectInfo? = nil,
         basePrompt: String? = nil,
-        contextSize: Int? = nil
+        contextSize: Int? = nil,
+        mcpToolCount: Int = 0
     ) -> String {
         var prompt = base(basePrompt, contextSize: contextSize)
         if let project {
@@ -154,6 +164,9 @@ enum AgentInstructions {
             }
         }
         prompt += includesTools ? toolsSection : noToolsSection
+        if includesTools, mcpToolCount > 0 {
+            prompt += mcpSection
+        }
         return prompt
     }
 

@@ -10,7 +10,7 @@ import Foundation
 /// UI-facing mirror (the same pattern Perspective Intelligence uses).
 struct ToolStep: Identifiable, Codable, Equatable, Sendable {
     enum Kind: String, Codable, Sendable {
-        case read, write, edit, list, search, git, command
+        case read, write, edit, list, search, git, command, mcp
     }
 
     enum Status: String, Codable, Sendable {
@@ -74,6 +74,7 @@ struct ToolStep: Identifiable, Codable, Equatable, Sendable {
         case .search: return "text.magnifyingglass"
         case .git: return "clock.arrow.circlepath"
         case .command: return "terminal"
+        case .mcp: return "server.rack"
         }
     }
 

@@ -11,6 +11,7 @@ struct AFMCodeApp: App {
     @State private var settings = AppSettings()
     @State private var mlx: MLXModelManager
     @State private var catalog: ModelCatalog
+    @State private var mcp: MCPHostManager
 
     // Built here (not in property initializers) because the catalog
     // needs the MLX manager, and a @State property's default value can't
@@ -20,6 +21,7 @@ struct AFMCodeApp: App {
         let mlxManager = MLXModelManager(modelContext: context)
         _mlx = State(initialValue: mlxManager)
         _catalog = State(initialValue: ModelCatalog(modelContext: context, mlx: mlxManager))
+        _mcp = State(initialValue: MCPHostManager(modelContext: context))
     }
 
     var body: some Scene {
@@ -30,6 +32,7 @@ struct AFMCodeApp: App {
                 .environment(workspaces)
                 .environment(settings)
                 .environment(mlx)
+                .environment(mcp)
                 .modelContainer(ModelContainerProvider.container)
                 .frame(minWidth: 860, minHeight: 540)
                 .task {
@@ -46,6 +49,7 @@ struct AFMCodeApp: App {
                 .environment(catalog)
                 .environment(settings)
                 .environment(mlx)
+                .environment(mcp)
         }
     }
 }

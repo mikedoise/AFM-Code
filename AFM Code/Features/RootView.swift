@@ -5,6 +5,7 @@ import SwiftData
 /// shows either a project overview or a session chat.
 struct RootView: View {
     @Environment(ModelCatalog.self) private var catalog
+    @Environment(MCPHostManager.self) private var mcp
     @Environment(ChatController.self) private var chat
     @Environment(WorkspaceStore.self) private var workspaces
     @Environment(\.scenePhase) private var scenePhase
@@ -14,6 +15,8 @@ struct RootView: View {
     private var projects: [Project]
     @Query(sort: \ChatSession.lastMessageAt, order: .reverse)
     private var sessions: [ChatSession]
+    @Query(sort: \MCPServer.addedAt)
+    private var mcpServers: [MCPServer]
 
     var body: some View {
         @Bindable var chat = chat
@@ -38,6 +41,7 @@ struct RootView: View {
         .task {
             workspaces.refreshAll(projects: projects)
             chat.validateSelection(projects: projects, sessions: sessions)
+            mcp.reload(servers: mcpServers)
         }
         .onChange(of: projects.map(\.id)) {
             workspaces.refreshAll(projects: projects)
@@ -46,16 +50,36 @@ struct RootView: View {
         .onChange(of: sessions.map(\.id)) {
             chat.validateSelection(projects: projects, sessions: sessions)
         }
+        .onChange(of: mcpSignature) {
+            mcp.reload(servers: mcpServers)
+        }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active {
+            switch phase {
+            case .active:
                 workspaces.refreshAll(projects: projects)
                 // The on-device model is loaded on demand and its
                 // availability can change while backgrounded; re-probe
                 // on wake so badges and gauges stay truthful.
                 Task { await catalog.probe() }
+                // Reconnect any MCP servers released when the app
+                // went to the background.
+                mcp.reload(servers: mcpServers)
+            case .background:
+                mcp.shutdown()
+            default:
+                break
             }
         }
         .focusedSceneValue(\.afmSceneCommands, sceneCommands)
+    }
+
+    /// A comparison-friendly snapshot of the MCP configuration, so the
+    /// host manager is asked to reconcile only when a server row
+    /// actually changed (not on every unrelated re-render).
+    private var mcpSignature: String {
+        mcpServers
+            .map { $0.id.uuidString + "\u{1}" + $0.launchSignature }
+            .joined(separator: "\u{2}")
     }
 
     /// What the keyboard commands need from the window: the ordered

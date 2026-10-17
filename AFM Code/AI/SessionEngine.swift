@@ -37,6 +37,7 @@ final class SessionEngine {
     private let modelContext: ModelContext
     private let catalog: ModelCatalog
     private let mlx: MLXModelManager
+    private let mcp: MCPHostManager
     private let settings: AppSettings
     private(set) var toolContext: ToolContext?
 
@@ -84,6 +85,7 @@ final class SessionEngine {
         modelContext: ModelContext,
         catalog: ModelCatalog,
         mlx: MLXModelManager,
+        mcp: MCPHostManager,
         workspaces: WorkspaceStore,
         settings: AppSettings
     ) {
@@ -91,6 +93,7 @@ final class SessionEngine {
         self.modelContext = modelContext
         self.catalog = catalog
         self.mlx = mlx
+        self.mcp = mcp
         self.settings = settings
         self.toolContext = nil
         if let project = session.project {
@@ -201,16 +204,22 @@ final class SessionEngine {
     /// tool definitions, and build the session — resuming the saved
     /// transcript when one exists.
     private func configureSession<M: LanguageModel>(model: M, supportsTools: Bool) {
-        let tools = (supportsTools && toolContext != nil)
-            ? CodingTools(context: toolContext!).tools
-            : []
+        // The coding tools plus whatever the enabled MCP servers are
+        // currently offering; both need a project (the approval flow and,
+        // for the coding tools, the folder they operate in).
+        let tools: [any Tool] = {
+            guard supportsTools, let toolContext else { return [] }
+            return CodingTools(context: toolContext).tools
+                + mcp.mcpTools(context: toolContext)
+        }()
         sessionHasTools = !tools.isEmpty
         sessionTools = tools
         let prompt = AgentInstructions.prompt(
             includesTools: !tools.isEmpty,
             project: Self.makeProjectInfo(toolContext: toolContext),
             basePrompt: settings.systemPrompt,
-            contextSize: contextSize
+            contextSize: contextSize,
+            mcpToolCount: tools.filter { $0.name.hasPrefix("mcp__") }.count
         )
 
         if let data = session.transcriptData,
@@ -863,7 +872,8 @@ final class SessionEngine {
             includesTools: sessionHasTools,
             project: Self.makeProjectInfo(toolContext: toolContext),
             basePrompt: settings.systemPrompt,
-            contextSize: contextSize
+            contextSize: contextSize,
+            mcpToolCount: sessionTools.filter { $0.name.hasPrefix("mcp__") }.count
         )
         var newEntries: [Transcript.Entry] = [
             Self.makeInstructionsEntry(prompt: prompt, tools: sessionHasTools ? sessionTools : [])
