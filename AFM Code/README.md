@@ -14,6 +14,7 @@ AFM Code is a SwiftUI desktop app that runs large language models locally on you
 - **Chat sessions** — Multi-turn conversations with context compaction (automatic history summarization when the context window fills).
 - **Tool calling** — The agent can read/write files, run shell commands, interact with Git (log, blame, diff, status, branch, show, diff), and search file contents.
 - **Approval system** — File writes and shell commands require user approval before execution. Configurable allow, always-allow, and deny.
+- **MCP servers** — Add [Model Context Protocol](https://modelcontextprotocol.io) servers (npx, uvx, or any executable) in Settings; their tools join project sessions namespaced as `mcp__<server>__<tool>`, each call still approval-gated, and results run through the same allow/always-allow/deny flow as commands. Ships with a built-in catalog (filesystem, git, fetch, memory, sequential-thinking).
 - **Vision support** — Paste or drag images into the chat input; vision-capable models (GPT-4o, Claude, Qwen3-VL, Gemma 4) can see them.
 - **Model picker** — Choose between AFM models and downloaded MLX models per session.
 - **Appearance settings** — Chat bubble styles, 15 color palettes, gradient backgrounds per model.
@@ -43,6 +44,9 @@ AFM Code/
       ProjectOverviewView.swift     # Project info + missing-folder banner
     Settings/
       SettingsView.swift            # Appearance + model settings
+    Models/
+      ModelsView.swift              # MLX model library UI
+      MCPServersView.swift          # MCP server management UI
   AI/
     SessionEngine.swift             # Drives one chat session (AFM + MLX)
     Workspace.swift                 # Workspace store, bookmark management
@@ -53,11 +57,17 @@ AFM Code/
       MLXModelManager.swift         # MLX model library (download, cache, load)
       MLXFoundationModels/          # MLX adapter layer
       MLXLMCommon/                  # MLX language model abstractions
+    MCP/
+      MCPClient.swift               # stdio JSON-RPC client (one process per server)
+      MCPHostManager.swift          # App-level pool: connect, states, tool bridge
+      MCPTool.swift                 # FoundationModels Tool conformance for MCP tools
+      MCPServerCatalog.swift        # Built-in server catalog (filesystem, git, …)
   Models/
     Project.swift                   # SwiftData: project metadata + bookmark
     ChatSession.swift               # SwiftData: session + messages
     Message.swift                   # SwiftData: individual message
     MlxModel.swift                  # SwiftData: MLX model metadata
+    MCPServer.swift                 # SwiftData: configured MCP server
     PendingImageAttachment.swift    # Staged image before sending
   Support/
     ChatInputTextView.swift         # Native NSTextView with pasteboard image detection
@@ -116,6 +126,17 @@ Uses the `mlx-swift-lm-afm` library (vendored fork). Supports:
 
 Browse and download models in **Settings → Models**.
 
+### MCP Servers
+
+AFM Code speaks the [Model Context Protocol](https://modelcontextprotocol.io) over stdio: each configured server runs as a local child process (launched with your real shell environment, so `npx`/`uvx`/Homebrew resolve like they do in your terminal), and its `tools/list` entries are bridged into the model session with the server's own JSON schemas.
+
+- **Namespacing** — tools appear as `mcp__<server>__<tool>`, so servers can't shadow each other or built-in tools.
+- **Safety** — every MCP tool call goes through the project's approval flow (Deny / Allow / Always Allow). "Always Allow" remembers the tool for the project; auto-approve projects run them without a card. Results are capped so a chatty server can't flood the model's context.
+- **Scope** — MCP tools are available in project sessions (they need the project-scoped approval flow).
+- **Transport** — v1 supports stdio servers only; HTTP/streamable MCP servers are future work.
+
+Manage servers in **Settings → MCP Servers** (built-in catalog, plus your own via a launch command or pasted `mcpServers` JSON).
+
 ## Keyboard Shortcuts
 
 The same keystrokes Perspective Intelligence provides, adapted to AFM Code's single-window sessions model. All live in the **Sessions** menu and File menu.
@@ -150,10 +171,12 @@ The same keystrokes Perspective Intelligence provides, adapted to AFM Code's sin
 | 9 | Vision/attachment support (paste/drag images, preview chips, message bubbles) |
 | 10 | VoiceOver parity with Perspective Intelligence (message labels, turn announcements, settings) |
 | 11 | Keyboard shortcuts from Perspective Intelligence (Sessions menu: stop, regenerate, copy, model picker, navigation, deletion, recents) |
+| 12 | MCP support (stdio servers, settings UI, approval-gated tools bridged into sessions) |
 
 ## Privacy
 
 - All inference runs on-device. No data leaves your Mac.
+- MCP servers are user-managed extensions: a server like `fetch` sends its work to external services, and servers run inside the app sandbox (a filesystem server can only see what the app can see).
 - Projects are accessed via security-scoped bookmarks (sandbox-compatible).
 - No telemetry, no analytics, no cloud services.
 
