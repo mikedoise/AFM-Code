@@ -46,6 +46,7 @@ struct ChatInputTextView: NSViewRepresentable {
         )
 
         let scrollView = FocusForwardingScrollView()
+        scrollView.setAccessibilityElement(false)
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
@@ -188,7 +189,18 @@ struct ChatInputTextView: NSViewRepresentable {
 
         nonisolated func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             MainActor.assumeIsolated {
+                if commandSelector == #selector(NSResponder.insertTab(_:)) {
+                    flushBindingUpdate(textView.string)
+                    textView.window?.selectNextKeyView(textView)
+                    return true
+                }
+                if commandSelector == #selector(NSResponder.insertBacktab(_:)) {
+                    flushBindingUpdate(textView.string)
+                    textView.window?.selectPreviousKeyView(textView)
+                    return true
+                }
                 if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                    guard parent.onSubmit != nil else { return false }
                     if NSEvent.modifierFlags.contains(.shift) {
                         textView.insertNewlineIgnoringFieldEditor(nil)
                         return true

@@ -51,10 +51,12 @@ struct SessionSidebarView: View {
                 }
             }
 
-            Section("Projects") {
+            Section {
                 ForEach(projects) { project in
                     projectDisclosure(project)
                 }
+            } header: {
+                Text("Projects").foregroundStyle(.primary)
             }
         }
         .overlay {
@@ -203,10 +205,11 @@ struct SessionSidebarView: View {
             Button {
                 createSession(in: project)
             } label: {
-                Label("New Session", systemImage: "plus")
+                Label("Create Session", systemImage: "plus")
                     .font(.callout)
             }
             .buttonStyle(.borderless)
+            .accessibilityLabel("Create session in \(project.name)")
             .disabled(!canCreateSession(in: project))
         } label: {
             ProjectRow(
@@ -326,12 +329,12 @@ private struct ProjectRow: View {
             if sessionCount > 0 {
                 Text("\(sessionCount)")
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.primary)
                     .monospacedDigit()
             }
             statusDot
         }
-        .help("\(project.name) — \(project.folderName)")
+
         // One element: "My Project, 3 sessions, folder missing".
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(project.name)

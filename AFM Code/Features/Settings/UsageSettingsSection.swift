@@ -6,14 +6,14 @@ struct UsageSettingsSection: View {
     var body: some View {
         Section {
             if usage.isAvailable {
-                LabeledContent("Total recorded tokens", value: usage.totalTokens.formatted())
+                SettingsValueRow("Total recorded tokens", value: usage.totalTokens.formatted())
                     .font(.headline)
                     .accessibilityIdentifier("usage.totalTokens")
-                LabeledContent("Input tokens", value: usage.inputTokens.formatted())
-                LabeledContent("Output tokens", value: usage.outputTokens.formatted())
-                LabeledContent("Completed generations", value: usage.completedRequests.formatted())
+                SettingsValueRow("Input tokens", value: usage.inputTokens.formatted())
+                SettingsValueRow("Output tokens", value: usage.outputTokens.formatted())
+                SettingsValueRow("Completed generations", value: usage.completedRequests.formatted())
                 if let started = usage.trackingStartedAt {
-                    LabeledContent("Tracking since", value: started.formatted(date: .abbreviated, time: .shortened))
+                    SettingsValueRow("Tracking since", value: started.formatted(date: .abbreviated, time: .shortened))
                 }
                 if usage.pendingRequests > 0 {
                     Text("\(usage.pendingRequests.formatted()) \(usage.pendingRequests == 1 ? "generation is" : "generations are") in progress. Totals update when a generation completes.")

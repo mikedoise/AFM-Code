@@ -167,8 +167,8 @@ struct ChatView: View {
     /// device model. Double-tap to choose the model."
     private var accessibilityTitle: String {
         let title = session.title.isEmpty ? "Chat" : session.title
-        let model = (engine?.activeModel ?? catalog.selectedDescriptor(for: session))?.displayName
-        return model.map { "\(title), \($0)" } ?? title
+        let model = (engine?.activeModel ?? catalog.selectedDescriptor(for: session))?.accessibleDescription
+        return model.map { "\($0). Chat: \(title)" } ?? title
     }
 
     private var titleModelPickerButton: some View {
@@ -200,7 +200,7 @@ struct ChatView: View {
                                 )
                             )
                             .frame(width: 7, height: 7)
-                        Text(model.displayName)
+                        Text("Model: " + model.readableName)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)

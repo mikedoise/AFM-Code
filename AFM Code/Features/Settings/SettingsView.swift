@@ -6,6 +6,7 @@ struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(ModelCatalog.self) private var catalog
     @Environment(\.colorScheme) private var colorScheme
+    @FocusState private var systemPromptFocused: Bool
     @State private var showModels = false
     @State private var showMCP = false
     @AppStorage(ChatBubblePreference.key)
@@ -25,21 +26,25 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 700, height: 700)
+        .defaultFocus($systemPromptFocused, true)
     }
 
     // MARK: - System prompt
 
     private var promptSection: some View {
         Section {
-            TextEditor(text: Binding(
+            ChatInputTextView(text: Binding(
                 get: { settings.systemPrompt ?? "" },
                 set: { newValue in
                     let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
                     settings.systemPrompt = trimmed.isEmpty ? nil : newValue
                 }
-            ))
+            ), accessibilityLabel: "System Prompt", onSubmit: nil)
             .font(.system(.callout, design: .monospaced))
             .frame(minHeight: 260)
+            .accessibilityLabel("System Prompt")
+            .accessibilityHint("Leave empty to use the default instructions")
+            .focused($systemPromptFocused)
 
             LabeledContent("Characters") {
                 Text("\(settings.systemPrompt?.count ?? 0)")
@@ -64,15 +69,15 @@ struct SettingsView: View {
     private var modelSection: some View {
         Section {
             if let model = catalog.activeDescriptor {
-                LabeledContent("Detected", value: model.displayName)
+                SettingsValueRow("Detected model", value: model.readableName)
                 if let detail = model.detail {
-                    LabeledContent("Notes", value: detail)
+                    SettingsValueRow("Notes", value: detail)
                 }
                 if let size = model.contextSize {
-                    LabeledContent("Context window", value: "\(size) tokens")
+                    SettingsValueRow("Context window", value: "\(size) tokens")
                 }
                 if !model.capabilities.isEmpty {
-                    LabeledContent("Capabilities", value: model.capabilities.sorted().joined(separator: ", "))
+                    SettingsValueRow("Capabilities", value: model.capabilities.sorted().joined(separator: ", "))
                 }
             } else {
                 Text(catalog.descriptors.first?.availabilityDetail ?? "No on-device model detected.")
@@ -181,6 +186,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .accessibilityLabel("Announce activity")
             .help("Spoken (when VoiceOver is running) when the model starts working, or when a change is waiting for your approval.")
 
             Toggle(
@@ -194,6 +200,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .accessibilityLabel("Announce replies")
             .help("Spoken (when VoiceOver is running) when a reply finishes, so you know the text is final.")
         } header: {
             Text("VoiceOver")
@@ -230,5 +237,22 @@ struct SettingsView: View {
         .help(style.displayName)
         .accessibilityLabel("Background: \(style.displayName)")
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// Keep each static setting's label and value together, without Form merging
+/// consecutive LabeledContent rows into one unlabeled value list.
+struct SettingsValueRow: View {
+    let title: String
+    let value: String
+    init(_ title: String, value: String) { self.title = title; self.value = value }
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+            Spacer()
+            Text(value).foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title): \(value)")
     }
 }

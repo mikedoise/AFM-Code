@@ -142,7 +142,7 @@ struct ModelPickerPanel: View {
             : nil
 
         return ModelPickerCard(
-            title: descriptor.displayName,
+            title: descriptor.readableName,
             subtitle: cardSubtitle(for: descriptor),
             identity: identity,
             isSelected: selected,
@@ -175,8 +175,9 @@ struct ModelPickerPanel: View {
         }
         var parts: [String] = []
         if let contextSize = descriptor.contextSize {
-            parts.append("\(ModelBadgeView.compact(contextSize)) ctx")
+            parts.append("Context window: \(contextSize.formatted()) tokens")
         }
+        parts.append(descriptor.modalityDescription)
         if !descriptor.capabilities.isEmpty {
             let order = ["toolCalling", "reasoning", "vision"]
             let labels: [String: String] = [
@@ -275,8 +276,7 @@ private struct ModelPickerCard: View {
         // progress, and selection state — "Gemma 4, Available, 80
         // percent downloaded, selected".
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(cardAccessibilityLabel)
-        .accessibilityValue(cardAccessibilityValue)
+        .accessibilityLabel([title, cardAccessibilityValue, isSelected ? "Selected" : (isAvailable ? "" : "Unavailable")].filter { !$0.isEmpty }.joined(separator: ". "))
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 

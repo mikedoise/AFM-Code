@@ -15,22 +15,30 @@ struct CoreAIModelsSection: View {
                 Text(error).foregroundStyle(.orange).textSelection(.enabled)
             }
             ForEach(catalog.coreAI.models) { model in
+                let name = ModelDescriptor.readableCoreAIName(model.name, contextSize: model.contextSize)
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text(model.name).font(.headline)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(name).font(.headline)
+                            Text("Context window: \(model.contextSize.formatted()) tokens. Modalities: text").font(.caption)
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("\(name). Context window: \(model.contextSize.formatted()) tokens. Modalities: text")
                         Spacer()
                         Button("Remove from Library", role: .destructive) { catalog.coreAI.remove(model.id) }
                             .disabled(catalog.coreAI.isBusy)
-                            .accessibilityLabel("Remove \(model.name) from library")
+                            .accessibilityLabel("Remove \(name) from library")
                             .help("Removes the saved reference only. Model files stay on disk.")
                     }
-                    Text("\(model.contextSize.formatted()) tokens · Core AI text model").font(.caption)
+                    Text("Identifier: " + model.name).font(.caption).textSelection(.enabled)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Original model identifier: " + model.name)
                     if catalog.coreAI.loadedModelID == model.id {
                         HStack {
                             Text("Loaded in memory for faster follow-up messages").font(.caption)
                             Button("Unload Model") { catalog.coreAI.unloadIdleModel() }
                                 .disabled(catalog.coreAI.isBusy)
-                                .accessibilityLabel("Unload \(model.name) from memory")
+                                .accessibilityLabel("Unload \(name) from memory")
                         }
                     }
                     if let capabilities = catalog.coreAI.capabilities[model.id] {
@@ -40,10 +48,14 @@ struct CoreAIModelsSection: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Text(model.folderPath).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Model files: " + model.folderPath)
                     if let problem = catalog.coreAI.problems[model.id] {
                         Text(problem).foregroundStyle(.orange)
                     } else if catalog.coreAI.capabilities[model.id] == nil {
-                        Text("Ready to load. Capabilities and runtime compatibility are checked on the first response.")
+                        Text("Ready to load. Runtime compatibility not yet checked.")
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("Ready to load. Runtime compatibility not yet checked.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }

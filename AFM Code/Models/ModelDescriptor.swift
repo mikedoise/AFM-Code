@@ -70,3 +70,42 @@ enum ModelSelection: Hashable, Sendable {
     case mlx(repoID: String)
     case coreAI(id: String)
 }
+
+// Presentation only: never change persisted identities or repository paths.
+extension ModelDescriptor {
+    var readableName: String {
+        kind == .coreAI ? Self.readableCoreAIName(displayName, contextSize: contextSize) : displayName
+    }
+
+    static func readableCoreAIName(_ name: String, contextSize: Int?) -> String {
+        guard name.contains("-") || name.contains("_") else { return name }
+        var parts = name.replacingOccurrences(of: "_", with: "-").split(separator: "-").map(String.init)
+        parts.removeAll { part in
+            let lower = part.lowercased()
+            if lower == "coreai" || lower == "text" { return true }
+            if let contextSize, lower == "ctx\(contextSize)" { return true }
+            if let contextSize, contextSize % 1024 == 0, lower == "\(contextSize / 1024)k" { return true }
+            return false
+        }
+        return parts.map { part in
+            if part.lowercased() == "gemma" { return "Gemma" }
+            if part.lowercased() == "gemma4" { return "Gemma 4" }
+            if part.lowercased() == "e2b" { return "E2B" }
+            if part.lowercased() == "it" { return "instruction tuned" }
+            if part.lowercased().hasSuffix("bit"), let bits = Int(part.dropLast(3)) { return "\(bits) bit" }
+            return part
+        }.joined(separator: " ")
+    }
+
+    var modalityDescription: String {
+        // The Core AI importer accepts only kind=llm text exports.
+        if kind == .coreAI { return "Modalities: text" }
+        if capabilities.contains("vision") { return "Modalities: text and images" }
+        return "Modalities: text; image support not reported"
+    }
+
+    var accessibleDescription: String {
+        let context = contextSize.map { "Context window: \($0.formatted()) tokens" } ?? "Context window: not reported"
+        return "\(readableName). \(context). \(modalityDescription)"
+    }
+}

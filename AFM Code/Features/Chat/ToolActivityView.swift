@@ -36,6 +36,7 @@ struct ToolStepView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: step.icon)
+                .accessibilityHidden(true)
                     .foregroundStyle(.orange)
                 Text(step.title)
                     .font(.callout.weight(.medium))
@@ -128,6 +129,7 @@ struct ToolStepView: View {
                         .font(.caption)
                         .foregroundStyle(statusColor)
                     Image(systemName: step.icon)
+                .accessibilityHidden(true)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(step.title)

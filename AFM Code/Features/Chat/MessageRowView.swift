@@ -133,7 +133,10 @@ struct MessageRowView: View {
     // MARK: - Body
 
     var body: some View {
-        Group {
+        VStack(alignment: role == .user ? .trailing : .leading, spacing: 4) {
+            Text(role == .user ? "Your message" : "Assistant message")
+                .font(.caption.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
             if role == .user {
                 userLayout
                     // One element per message — the bubble, timestamp,
@@ -312,8 +315,6 @@ struct MessageRowView: View {
                 .equatable()
                 // Keep the renderer's headings, links, and table cells
                 // reachable instead of replacing them with raw markdown.
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel(speakerName)
                 .accessibilityAction(named: Text("Copy message"), copyMessage)
                 .accessibilityAddTraits(isStreaming ? .updatesFrequently : [])
             }

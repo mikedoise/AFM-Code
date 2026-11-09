@@ -659,6 +659,7 @@ private struct SelectableLinkTextView: NSViewRepresentable {
         let textView = SelectableLinkNSTextView()
         textView.drawsBackground = false
         textView.isEditable = false
+        textView.setAccessibilityRoleDescription("Read-only message text")
         textView.isSelectable = true
         textView.isRichText = true
         textView.isVerticallyResizable = true
@@ -719,6 +720,10 @@ private struct SelectableLinkTextView: NSViewRepresentable {
 /// NSTextView subclass that reports its first text baseline to SwiftUI
 /// so `HStack(alignment: .firstTextBaseline)` aligns bullets/numbers correctly.
 final class SelectableLinkNSTextView: NSTextView {
+    // Tab navigates instead of being consumed by a read-only text block.
+    override func insertTab(_ sender: Any?) { window?.selectNextKeyView(self) }
+    override func insertBacktab(_ sender: Any?) { window?.selectPreviousKeyView(self) }
+
     override var firstBaselineOffsetFromTop: CGFloat {
         guard let layoutManager, let textContainer else {
             return super.firstBaselineOffsetFromTop

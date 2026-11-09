@@ -179,6 +179,14 @@ struct ComposerView: View {
 
     // MARK: - Metadata row
 
+    private func contextDescription(used: Int?, size: Int) -> String {
+        guard let used else { return "Context: not measured yet. Window: \(size.formatted()) tokens" }
+        let percent = Int((Double(used) / Double(size) * 100).rounded())
+        let remaining = max(0, size - used)
+        let warning = percent >= 90 ? ". Almost full" : percent >= 70 ? ". History may be compressed soon" : ""
+        return "Context: \(percent) percent used. \(remaining.formatted()) of \(size.formatted()) tokens left\(warning)"
+    }
+
     private var metadataRow: some View {
         HStack(spacing: 10) {
             ModelBadgeView(status: engine?.modelStatus ?? catalog.status(for: model))
@@ -200,8 +208,7 @@ struct ComposerView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 2))
                         .frame(width: 56, height: 5)
                         .opacity(used == nil ? 0.35 : 1)
-                    Text(used.map { "\(ModelBadgeView.compact($0)) / \(ModelBadgeView.compact(size)) tokens" }
-                         ?? "\(ModelBadgeView.compact(size)) token window")
+                    Text(contextDescription(used: used, size: size))
                         .foregroundStyle(.secondary)
                 }
                 .font(.caption2)
@@ -209,11 +216,7 @@ struct ComposerView: View {
                       ? "The model's context window. Usage is counted once the transcript is measured."
                       : "Context used by this session against the model's window. Older history compresses automatically as it fills.")
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(
-                    used.map {
-                        "Context: \(ModelBadgeView.compact($0)) of \(ModelBadgeView.compact(size)) tokens used"
-                    } ?? "Context window: \(ModelBadgeView.compact(size)) tokens"
-                )
+                .accessibilityLabel(contextDescription(used: used, size: size))
             }
             if engine?.isCompacting == true {
                 HStack(spacing: 4) {

@@ -47,6 +47,7 @@ struct DiffView: View {
     private var header: some View {
         HStack(spacing: 6) {
             Image(systemName: "doc.text")
+                .accessibilityHidden(true)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text(diff.path)
@@ -61,11 +62,13 @@ struct DiffView: View {
             Spacer()
             if diff.additions > 0 {
                 Text("+\(diff.additions)")
+                    .accessibilityLabel("\(diff.additions) \(diff.additions == 1 ? "line" : "lines") added")
                     .font(.system(.caption2, design: .monospaced))
                     .foregroundStyle(.green)
             }
             if diff.removals > 0 {
                 Text("−\(diff.removals)")
+                    .accessibilityLabel("\(diff.removals) \(diff.removals == 1 ? "line" : "lines") removed")
                     .font(.system(.caption2, design: .monospaced))
                     .foregroundStyle(.red)
             }
@@ -160,11 +163,13 @@ struct DiffSheetView: View {
                 }
                 if diff.additions > 0 {
                     Text("+\(diff.additions)")
+                    .accessibilityLabel("\(diff.additions) \(diff.additions == 1 ? "line" : "lines") added")
                         .font(.caption)
                         .foregroundStyle(.green)
                 }
                 if diff.removals > 0 {
                     Text("−\(diff.removals)")
+                    .accessibilityLabel("\(diff.removals) \(diff.removals == 1 ? "line" : "lines") removed")
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
