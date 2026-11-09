@@ -55,6 +55,10 @@ struct ThinkingCardView: View {
                 .padding(.vertical, 6)
             }
             .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Model reasoning")
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            .accessibilityHint(isExpanded ? "Collapse reasoning" : "Expand to read reasoning")
 
             // Expanded content
             if isExpanded {
@@ -82,9 +86,6 @@ struct ThinkingCardView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(Color.purple.opacity(0.12), lineWidth: 0.5)
         )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(String(localized: "Model reasoning"))
-        .accessibilityValue(thinkingContent)
-        .accessibilityHint(isExpanded ? String(localized: "Tap to collapse") : String(localized: "Tap to expand reasoning"))
+
     }
 }

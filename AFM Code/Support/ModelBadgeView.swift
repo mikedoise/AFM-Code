@@ -3,6 +3,7 @@ import SwiftUI
 /// Explicit per-selection status. Never substitutes the first catalog model.
 struct ModelBadgeView: View {
     let status: ModelStatus
+    @State private var showsDetails = false
 
     private var color: Color {
         switch status.state {
@@ -15,24 +16,31 @@ struct ModelBadgeView: View {
     }
 
     var body: some View {
+        Button { showsDetails.toggle() } label: {
         HStack(spacing: 6) {
             if status.state == .preparing {
                 ProgressView().controlSize(.mini).accessibilityHidden(true)
             } else {
                 Circle().fill(color).frame(width: 7, height: 7).accessibilityHidden(true)
             }
-            Text(status.name).font(.caption.weight(.medium)).truncationMode(.middle)
+            Text("Model: " + status.name).font(.caption.weight(.medium)).truncationMode(.middle)
             Text("· " + status.label).font(.caption).foregroundStyle(.secondary)
         }
+        }
+        .buttonStyle(.plain)
         .lineLimit(1)
-        .help([status.name, status.detail, status.model.map(Self.helpText)].compactMap { $0 }.joined(separator: "\n"))
+        .popover(isPresented: $showsDetails) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let model = status.model { Text(model.accessibleDescription) }
+                Text(status.detail ?? status.label)
+                Button("Done") { showsDetails = false }
+            }
+            .padding().frame(width: 340)
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(status.accessibilityLabel)
-        .accessibilityValue([
-            status.detail,
-            (status.model?.contextSize).map { "\(Self.compact($0)) token context" }
-        ].compactMap { $0 }.joined(separator: ". "))
-        .accessibilityAddTraits(.updatesFrequently)
+        .accessibilityHint("Show model details")
+
     }
 
     static func helpText(for model: ModelDescriptor) -> String {

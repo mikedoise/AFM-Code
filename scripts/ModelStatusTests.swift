@@ -58,6 +58,13 @@ import Synchronization
         precondition(ModelStatus.resolve(model: a, role: .projectDefault).label == "Project default")
         precondition(ModelStatus.resolve(model: afm, role: .appDefault).label == "Default")
         precondition(ModelStatus.resolve(model: b).accessibilityLabel.contains("Gemma B"))
+        let imported = ModelDescriptor(kind: .coreAI, displayName: "gemma-4-E2B-it-coreai-4bit-128k-text", detail: nil, isAvailable: true, contextSize: 131072)
+        precondition(ModelDescriptor.readableCoreAIName("gemma4-e2b-4bit-ctx131072", contextSize: 131072) == "Gemma 4 E2B 4 bit")
+        precondition(imported.readableName == "Gemma 4 E2B instruction tuned 4 bit")
+        precondition(imported.accessibleDescription.hasPrefix(imported.readableName + ". Context window:"))
+        precondition(imported.accessibleDescription.hasSuffix("Modalities: text"))
+        precondition(ModelStatus.resolve(model: imported, loaded: true).accessibilityLabel == imported.readableName + ". Loaded.")
+        print("PASS imported identity, context and modality order, concise model-first status")
         print("PASS selected, preparing, loaded, in-use, error, unavailable and default labels are distinct and accessible")
     }
 }

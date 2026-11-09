@@ -92,6 +92,7 @@ struct MCPServersView: View {
 
         return HStack(spacing: 10) {
             Image(systemName: entry.symbol)
+                .accessibilityHidden(true)
                 .foregroundStyle(.secondary)
                 .frame(width: 20)
             VStack(alignment: .leading, spacing: 2) {
@@ -123,6 +124,7 @@ struct MCPServersView: View {
                     try? modelContext.save()
                 }
                 .controlSize(.small)
+                .accessibilityLabel("Add \(entry.name) server")
             }
         }
         .help("“\(entry.command)” \(entry.arguments.joined(separator: " "))")
@@ -399,6 +401,7 @@ private struct MCPServerEditor: View {
 
             if editingJSON {
                 TextEditor(text: $jsonText)
+                    .accessibilityLabel("MCP server JSON")
                     .font(.system(.caption, design: .monospaced))
                     .frame(minHeight: 240)
                     .overlay(
@@ -416,6 +419,7 @@ private struct MCPServerEditor: View {
             } else {
                 field("Name (optional)") {
                     TextField("Derived from the command if left empty", text: $draft.name)
+                        .accessibilityLabel("Server name, optional")
                         .textFieldStyle(.roundedBorder)
                 }
                 field("Launch command") {
@@ -423,6 +427,7 @@ private struct MCPServerEditor: View {
                         "npx -y @modelcontextprotocol/server-filesystem ~/Documents",
                         text: $launchCommandText
                     )
+                    .accessibilityLabel("Launch command")
                     .font(.system(.callout, design: .monospaced))
                     .textFieldStyle(.roundedBorder)
                     Text("Paste the executable and any arguments on one line. AFM Code launches it directly over stdio, never through a shell.")
@@ -436,6 +441,8 @@ private struct MCPServerEditor: View {
                 }
                 field("Environment (one KEY=VALUE per line)") {
                     TextEditor(text: environmentText)
+                        .accessibilityLabel("Environment variables")
+                        .accessibilityHint("One KEY equals VALUE per line")
                         .font(.system(.caption, design: .monospaced))
                         .frame(height: 60)
                         .overlay(

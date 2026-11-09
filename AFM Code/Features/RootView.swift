@@ -150,6 +150,7 @@ private struct EmptyDetailView: View {
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: hasProjects ? "curlybraces.square" : "folder.badge.questionmark")
+                .accessibilityHidden(true)
                 .font(.system(size: 44))
                 .foregroundStyle(.secondary)
             Text(hasProjects ? "No Selection" : "Welcome to AFM Code")

@@ -551,9 +551,9 @@ final class SessionEngine {
             if let preparation = coreAIPreparation, let turnStarted = coreAITurnStarted {
                 let responseSeconds = ProcessInfo.processInfo.systemUptime - responseStarted
                 let totalSeconds = ProcessInfo.processInfo.systemUptime - turnStarted
-                let firstText = firstTextSeconds.map { String(format: "%.2f s", $0) } ?? "none"
-                let mode = preparation.reusedModel ? "Model reused" : "Model loaded"
-                coreAIPerformanceSummary = "\(mode) · prepare \(String(format: "%.2f", preparation.totalSeconds)) s · first text \(firstText) · response \(String(format: "%.2f", responseSeconds)) s · \(response.usage.output.totalTokenCount) output tokens"
+                let firstText = firstTextSeconds.map { String(format: "%.2f seconds", $0) } ?? "none"
+                let mode = preparation.reusedModel ? "Model already in memory" : "Model loaded into memory"
+                coreAIPerformanceSummary = "\(mode); preparation: \(String(format: "%.2f", preparation.totalSeconds)) seconds; first response text after preparation: \(firstText); response including first-text wait: \(String(format: "%.2f", responseSeconds)) seconds; \(response.usage.output.totalTokenCount) output tokens"
                 Self.logger.info("Core AI timings: reused \(preparation.reusedModel), prepare \(preparation.totalSeconds) s, tokenizer \(preparation.tokenizerSeconds) s, engine \(preparation.engineSeconds) s, prewarm wait \(preparation.prewarmWaitSeconds) s, first text \(firstText), response \(responseSeconds) s, total \(totalSeconds) s, output tokens \(response.usage.output.totalTokenCount)")
             }
             finalizeAssistantResponse(response)
@@ -608,6 +608,10 @@ final class SessionEngine {
             Self.logger.info("turn cancelled")
             persistPartialAssistantMessage()
             state = .idle
+        } else if let toolError = error as? LanguageModelSession.ToolCallError {
+            Self.logger.error("Tool invocation failed: \(toolError.underlyingError)")
+            persistPartialAssistantMessage()
+            state = .error("The model could not complete a tool call. Its arguments may be invalid. Review completed changes before trying again.")
         } else if let modelError = error as? LanguageModelError {
             Self.logger.error("turn failed: \(modelError)")
             persistPartialAssistantMessage()

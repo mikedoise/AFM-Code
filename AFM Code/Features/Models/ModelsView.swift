@@ -10,6 +10,7 @@ struct ModelsView: View {
     @Environment(ModelCatalog.self) private var catalog
     @Query(sort: \MlxModel.addedAt, order: .reverse) private var models: [MlxModel]
     @State private var manualRepoID = ""
+    @State private var showsRepositoryField = false
 
     var body: some View {
         Form {
@@ -29,6 +30,7 @@ struct ModelsView: View {
         Section {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
+                .accessibilityHidden(true)
                     .foregroundStyle(.secondary)
                 TextField(
                     "Search Hugging Face (e.g. qwen3 4bit)",
@@ -62,9 +64,13 @@ struct ModelsView: View {
                     .foregroundStyle(.orange)
             }
 
-            DisclosureGroup("Add by repository id") {
+            Button { showsRepositoryField.toggle() } label: {
+                Label("Add by repository ID", systemImage: showsRepositoryField ? "chevron.down" : "chevron.right")
+            }
+            .accessibilityValue(showsRepositoryField ? "Expanded" : "Collapsed")
+            if showsRepositoryField {
                 HStack(spacing: 8) {
-                    TextField("org/model-name", text: $manualRepoID)
+                    TextField("Repository ID", text: $manualRepoID, prompt: Text("org/model-name"))
                         .textFieldStyle(.plain)
                         .font(.system(.callout, design: .monospaced))
                     Button("Add") {
@@ -72,6 +78,7 @@ struct ModelsView: View {
                         manualRepoID = ""
                         Task { await catalog.refreshMlxModels() }
                     }
+                    .accessibilityLabel("Add repository \(manualRepoID)")
                     .disabled(manualRepoID.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 .padding(.top, 4)
@@ -107,7 +114,7 @@ struct ModelsView: View {
                 if alreadyAdded {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
-                        .help("Already in your library")
+                        .accessibilityLabel("\(repoID) is already in your library")
                 } else {
                     Button("Add") {
                         mlx.add(repoID: repoID, result: result)
@@ -115,6 +122,7 @@ struct ModelsView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .accessibilityLabel("Add \(repoID) model")
                     .disabled(!runnable)
                     .help(runnable ? "" : "This repository doesn't carry MLX weights.")
                 }
@@ -175,10 +183,13 @@ private struct LibraryRow: View {
 
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
-                statusIcon
+                statusIcon.accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(model.displayName ?? model.repoID)
                         .font(.callout.weight(.medium))
+                    Text("Status: " + readinessDescription)
+                        .font(.caption)
+                        .accessibilityLabel("\(model.displayName ?? model.repoID): \(readinessDescription)")
                     Text(model.repoID)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -188,6 +199,7 @@ private struct LibraryRow: View {
                 Spacer()
                 if state == .downloading, let download {
                     Text("\(Int(download.fractionCompleted * 100))%")
+                        .accessibilityLabel("\(model.displayName ?? model.repoID): \(Int(download.fractionCompleted * 100)) percent downloaded")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -196,6 +208,7 @@ private struct LibraryRow: View {
 
             if state == .downloading, let download, download.totalBytes > 0 {
                 ProgressView(value: download.fractionCompleted)
+                    .accessibilityLabel("Download progress for \(model.displayName ?? model.repoID)")
             }
 
             metadata
@@ -208,6 +221,17 @@ private struct LibraryRow: View {
             // descriptors so chat pickers and the context window stay
             // current.
             await catalog.refreshMlxModels()
+        }
+    }
+
+    private var readinessDescription: String {
+        switch state {
+        case .ready: "Ready"
+        case .downloading: "Downloading"
+        case .notDownloaded: "Not downloaded"
+        case .downloadFailed: "Download failed"
+        case .deviceNotCapable: "Unsupported on this device"
+        case .unknown: "Checking availability"
         }
     }
 
@@ -238,6 +262,7 @@ private struct LibraryRow: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .accessibilityLabel("Cancel download for \(model.displayName ?? model.repoID)")
         case .ready:
             EmptyView()
         default:
@@ -246,6 +271,7 @@ private struct LibraryRow: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .accessibilityLabel("\(state == .downloadFailed ? "Retry download for" : "Download") \(model.displayName ?? model.repoID)")
         }
         Button {
             mlx.remove(model)
@@ -255,6 +281,7 @@ private struct LibraryRow: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+        .accessibilityLabel("Remove \(model.displayName ?? model.repoID) from library and delete downloaded weights")
         .help("Remove from the library and delete its downloaded weights.")
     }
 
@@ -263,7 +290,7 @@ private struct LibraryRow: View {
         let parts: [String] = [
             model.modelType.map { "type \($0)" } ?? nil,
             model.sizeBytes.map { "\(ModelBadgeView.compact(Int($0 / (1024 * 1024)))) MB" } ?? nil,
-            model.maxContextTokens.map { "\(ModelBadgeView.compact($0)) ctx" } ?? nil,
+            model.maxContextTokens.map { "Context window: \($0.formatted()) tokens" } ?? nil,
             model.capabilities?.joined(separator: ", ") ?? nil
         ].compactMap { $0 }
         if !parts.isEmpty {

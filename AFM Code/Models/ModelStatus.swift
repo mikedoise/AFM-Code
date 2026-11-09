@@ -44,16 +44,16 @@ struct ModelStatus: Equatable, Sendable {
                         failure: String? = nil) -> ModelStatus {
         let state: State
         let detail: String?
-        if preparing { state = .preparing; detail = "Preparing this model. It is not yet confirmed loaded." }
+        if preparing { state = .preparing; detail = "Loading model into memory." }
         else if inUse { state = .inUse; detail = "This model is handling the current turn." }
         else if model?.isAvailable != true { state = .unavailable; detail = model?.availabilityDetail ?? "No model is available." }
         else if loaded { state = .loaded; detail = "This model is loaded in memory." }
         else if let failure { state = .failed; detail = failure }
-        else { state = .selected; detail = "Chosen for the next request. Availability does not mean the model is loaded." }
+        else { state = .selected; detail = "Ready to load." }
         return ModelStatus(model: model, role: role, state: state, detail: detail)
     }
 
     var label: String { state == .selected ? role.rawValue : state.rawValue }
-    var name: String { model?.displayName ?? "No model available" }
-    var accessibilityLabel: String { "\(role.rawValue) model: \(name), \(label)" }
+    var name: String { model?.readableName ?? "No model available" }
+    var accessibilityLabel: String { "\(name). \(label)." }
 }

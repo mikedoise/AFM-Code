@@ -28,7 +28,7 @@ struct ProjectOverviewView: View {
             Divider()
 
             HStack {
-                Text("Sessions")
+                Text("Project")
                     .font(.title3.weight(.semibold))
                 Spacer()
                 Button {
@@ -51,6 +51,7 @@ struct ProjectOverviewView: View {
                     allowlistSection
                 }
 
+                Section("Sessions") {
                 ForEach(project.sessionList) { session in
                     Button {
                         chat.selection = .session(session.id)
@@ -58,6 +59,7 @@ struct ProjectOverviewView: View {
                         SessionRow(session: session)
                     }
                     .buttonStyle(.plain)
+                }
                 }
             }
             .listStyle(.inset)
@@ -85,6 +87,7 @@ struct ProjectOverviewView: View {
     private func header(_ workspace: Workspace) -> some View {
         HStack(spacing: 12) {
             Image(systemName: "folder.fill")
+                .accessibilityHidden(true)
                 .font(.title2)
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
