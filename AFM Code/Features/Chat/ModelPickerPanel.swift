@@ -10,6 +10,7 @@ import SwiftData
 struct ModelPickerPanel: View {
     let session: ChatSession
     let catalog: ModelCatalog
+    var isBusy = false
 
     @Environment(MLXModelManager.self) private var mlx
     @Environment(\.modelContext) private var modelContext
@@ -24,13 +25,29 @@ struct ModelPickerPanel: View {
 
                 Spacer()
 
+                Button("Add Core AI Model…") {
+                    Task {
+                        if let id = await catalog.coreAI.chooseModel() {
+                            session.modelKind = .coreAI
+                            session.coreAIModelID = id
+                            session.mlxModelID = nil
+                            try? modelContext.save()
+                        }
+                    }
+                }
+                .disabled(isBusy || catalog.coreAI.isImporting || catalog.coreAI.isBusy)
+
                 Button("Manage Models") {
                     showModels = true
                 }
                 .controlSize(.small)
-                .help("Search the Hugging Face Hub and download models to run locally.")
+                .help("Import a Core AI export or manage downloaded MLX models.")
             }
 
+            if let error = catalog.coreAI.importError {
+                Text(error).font(.callout).foregroundStyle(.orange).textSelection(.enabled)
+                    .accessibilityLabel("Core AI import error: " + error)
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     sectionLabel("On-Device")
@@ -38,6 +55,13 @@ struct ModelPickerPanel: View {
                         bestAvailableCard
                         ForEach(catalog.afmDescriptors) { descriptor in
                             card(for: descriptor)
+                        }
+                    }
+
+                    if !catalog.coreAI.descriptors.isEmpty {
+                        sectionLabel("Core AI Library")
+                        grid {
+                            ForEach(catalog.coreAI.descriptors) { descriptor in card(for: descriptor) }
                         }
                     }
 
@@ -52,6 +76,7 @@ struct ModelPickerPanel: View {
                 }
             }
         }
+        .disabled(isBusy)
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
@@ -104,6 +129,7 @@ struct ModelPickerPanel: View {
         ) {
             session.modelKind = nil
             session.mlxModelID = nil
+            session.coreAIModelID = nil
             try? modelContext.save()
         }
     }
@@ -126,6 +152,7 @@ struct ModelPickerPanel: View {
         ) {
             session.modelKind = descriptor.kind
             session.mlxModelID = descriptor.kind == .mlx ? descriptor.mlxRepoID : nil
+            session.coreAIModelID = descriptor.kind == .coreAI ? descriptor.coreAIModelID : nil
             try? modelContext.save()
         }
         .disabled(!descriptor.isAvailable)
@@ -136,7 +163,9 @@ struct ModelPickerPanel: View {
         descriptor.isAvailable && (
             descriptor.kind == .mlx
                 ? session.modelKind == .mlx && session.mlxModelID == descriptor.mlxRepoID
-                : session.modelKind == descriptor.kind
+                : descriptor.kind == .coreAI
+                    ? session.modelKind == .coreAI && session.coreAIModelID == descriptor.coreAIModelID
+                    : session.modelKind == descriptor.kind
         )
     }
 
@@ -168,7 +197,7 @@ struct ModelPickerPanel: View {
 
     private func statusIcon(isSelected: Bool, isAvailable: Bool) -> String? {
         if !isAvailable {
-            return "icloud.and.arrow.down"
+            return "exclamationmark.triangle.fill"
         }
         if isSelected {
             return "checkmark.circle.fill"

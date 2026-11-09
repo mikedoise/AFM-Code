@@ -15,6 +15,8 @@ final class ChatSession {
     /// The MLX model's Hugging Face repository id, when
     /// `modelKindRaw` is `"mlx"`.
     var mlxModelID: String?
+    /// Persistent identity of a user-selected Core AI export.
+    var coreAIModelID: String?
     /// JSON-encoded `FoundationModels.Transcript`, used to resume the
     /// model session with its full prior history (prompts, responses,
     /// and — from Phase 3 onward — tool calls/outputs).

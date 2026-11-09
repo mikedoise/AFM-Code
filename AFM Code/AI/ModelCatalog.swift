@@ -23,6 +23,7 @@ final class ModelCatalog {
 
     private let modelContext: SwiftData.ModelContext
     private let mlx: MLXModelManager
+    let coreAI = CoreAIModelManager()
 
     init(modelContext: SwiftData.ModelContext, mlx: MLXModelManager) {
         self.modelContext = modelContext
@@ -32,7 +33,7 @@ final class ModelCatalog {
     /// Every model AFM Code can prompt. Pickers iterate this: the
     /// on-device pair first, then the library's MLX models.
     var descriptors: [ModelDescriptor] {
-        afmDescriptors + mlxDescriptors
+        afmDescriptors + mlxDescriptors + coreAI.descriptors
     }
 
     /// The best model the app can use right now: the on-device model
@@ -50,6 +51,31 @@ final class ModelCatalog {
     func descriptor(for kind: ModelDescriptor.Kind, mlxRepoID: String?) -> ModelDescriptor? {
         guard kind == .mlx, let mlxRepoID else { return nil }
         return descriptors.first { $0.kind == .mlx && $0.mlxRepoID == mlxRepoID }
+    }
+
+    func selectedDescriptor(for session: ChatSession) -> ModelDescriptor? {
+        let selected = session.modelKind.map { ModelChoice(kind: $0, mlxRepoID: session.mlxModelID, coreAIID: session.coreAIModelID) }
+        let inherited = session.project?.modelKind.map { ModelChoice(kind: $0, mlxRepoID: session.project?.mlxModelID, coreAIID: session.project?.coreAIModelID) }
+        return ModelSelectionResolver.resolve(session: selected, project: inherited, descriptors: descriptors)
+    }
+
+    func selectedDescriptor(for project: Project) -> ModelDescriptor? {
+        let inherited = project.modelKind.map { ModelChoice(kind: $0, mlxRepoID: project.mlxModelID, coreAIID: project.coreAIModelID) }
+        return ModelSelectionResolver.resolve(project: inherited, descriptors: descriptors)
+    }
+
+    func status(for model: ModelDescriptor?, role: ModelStatus.Role = .selected,
+                preparing: Bool = false, inUse: Bool = false, failure: String? = nil) -> ModelStatus {
+        let id = model?.kind == .coreAI ? model?.coreAIModelID : nil
+        var status = ModelStatus.resolve(model: model, role: role,
+            preparing: preparing || id.map { coreAI.isPreparing(modelID: $0) } == true,
+            inUse: inUse,
+            loaded: id.map { coreAI.loadedModelID == $0 } == true,
+            failure: failure ?? id.flatMap { coreAI.loadErrors[$0] })
+        if model == nil, role == .appDefault, status.state == .unavailable {
+            status.detail = descriptors.first?.availabilityDetail ?? status.detail
+        }
+        return status
     }
 
     /// Re-read availability, variant, context size, and capabilities of

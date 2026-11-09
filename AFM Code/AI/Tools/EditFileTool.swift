@@ -27,25 +27,38 @@ nonisolated struct EditFileTool: Tool {
 
     func call(arguments: Arguments) async throws -> String {
         try Task.checkCancellation()
-        guard await context.canOperate else {
-            return "The project folder is not available right now, so I can't edit files. Ask the user to re-connect the project folder."
-        }
-
         let path = arguments.path
-        let diff = await context.previewDiffForEdit(
-            path: path,
-            find: arguments.find,
-            replace: arguments.replace,
-            replaceAll: arguments.replaceAll ?? false
-        )
-
+        // Record the attempt before validation/preparation: failures here must
+        // be visible to the user as well as returned to the model.
         let stepID = await context.beginStep(
             kind: .edit,
             toolName: name,
             title: "Edit \(path)",
-            status: .awaiting,
-            diff: diff
+            status: .running
         )
+        let change: PreparedFileChange
+        do {
+            try Task.checkCancellation()
+            guard await context.canOperate else { throw ToolContext.ToolError.folderUnavailable }
+            change = try await context.prepareEdit(path: path, find: arguments.find, replace: arguments.replace, replaceAll: arguments.replaceAll ?? false)
+            try Task.checkCancellation()
+        } catch {
+            if error is CancellationError || Task.isCancelled {
+                await context.updateStep(stepID, status: .cancelled, summary: "stopped")
+                throw CancellationError()
+            }
+            let message = ReadFileTool.message(for: error)
+            await context.recordFileChangeFailure(stepID, phase: .preparation, error: error)
+            await context.updateStep(stepID, status: .failed, summary: message)
+            return "edit_file failed: \(message)"
+        }
+        if change.isNoOp {
+            let summary = "No changes needed; the file is unchanged."
+            await context.updateStep(stepID, status: .done, summary: summary)
+            return summary
+        }
+        let diff = change.diff
+        await context.updateStep(stepID, status: .awaiting, diff: diff)
         let decision = await context.approvals.wait(for: stepID)
 
         switch decision {
@@ -58,16 +71,16 @@ nonisolated struct EditFileTool: Tool {
         case .approve, .alwaysAllow:
             await context.updateStep(stepID, status: .approved, diff: diff)
             do {
-                let summary = try await context.editFile(
-                    path: path,
-                    find: arguments.find,
-                    replace: arguments.replace,
-                    replaceAll: arguments.replaceAll ?? false
-                )
+                let summary = try await context.applyChange(change)
                 await context.updateStep(stepID, status: .done, summary: summary, diff: diff)
                 return summary
             } catch {
+                if error is CancellationError || Task.isCancelled {
+                    await context.updateStep(stepID, status: .cancelled, summary: "stopped")
+                    throw CancellationError()
+                }
                 let message = ReadFileTool.message(for: error)
+                await context.recordFileChangeFailure(stepID, phase: .apply, error: error)
                 await context.updateStep(stepID, status: .failed, summary: message, diff: diff)
                 return "edit_file failed: \(message)"
             }

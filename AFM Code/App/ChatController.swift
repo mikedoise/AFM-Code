@@ -66,6 +66,9 @@ final class ChatController {
         return nil
     }
 
+    /// Read the existing engine for status without creating or loading one.
+    func existingEngine(forSessionID id: UUID) -> SessionEngine? { engines[id] }
+
     /// True while the session's engine is mid-turn (responding or
     /// compacting) — the ⌘. Stop command's enabled state. A session
     /// whose ChatView has never appeared has no cached engine and so

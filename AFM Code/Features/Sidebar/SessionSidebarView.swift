@@ -26,6 +26,21 @@ struct SessionSidebarView: View {
         sessions.filter { $0.project == nil }
     }
 
+    private var selectedModelStatus: ModelStatus {
+        switch selection {
+        case .session(let id):
+            guard let session = sessions.first(where: { $0.id == id }) else {
+                return catalog.status(for: nil)
+            }
+            return chat.existingEngine(forSessionID: id)?.modelStatus
+                ?? catalog.status(for: catalog.selectedDescriptor(for: session))
+        case .project(let id):
+            return catalog.status(for: projects.first(where: { $0.id == id }).flatMap { catalog.selectedDescriptor(for: $0) }, role: .projectDefault)
+        case nil:
+            return catalog.status(for: catalog.activeDescriptor, role: .appDefault)
+        }
+    }
+
     var body: some View {
         List(selection: $selection) {
             if !generalSessions.isEmpty {
@@ -118,7 +133,7 @@ struct SessionSidebarView: View {
             Text("The conversation is removed from AFM Code. Nothing else is changed.")
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            ModelBadgeView()
+            ModelBadgeView(status: selectedModelStatus)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10)
                 .background(.bar)
@@ -237,7 +252,7 @@ struct SessionSidebarView: View {
         guard let url = ProjectPicker.run() else { return }
         let project = Project(name: url.lastPathComponent)
         project.folderName = url.lastPathComponent
-        project.bookmarkData = try? url.bookmarkData(options: .withSecurityScope)
+        project.bookmarkData = try? url.bookmarkData(options: [])
         modelContext.insert(project)
         try? modelContext.save()
         expandedProjects.insert(project.id)

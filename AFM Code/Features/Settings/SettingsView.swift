@@ -15,6 +15,7 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            UsageSettingsSection()
             promptSection
             modelSection
             mlxSection
@@ -91,11 +92,11 @@ struct SettingsView: View {
             Button {
                 showModels = true
             } label: {
-                Label("Manage MLX Models…", systemImage: "square.stack.3d.up")
+                Label("Manage Local Models…", systemImage: "square.stack.3d.up")
             }
-            .help("Search the Hugging Face Hub and download models to run locally via MLX.")
+            .help("Import a Core AI .aimodel export or download MLX models from Hugging Face.")
         } header: {
-            Text("MLX Models")
+            Text("Local Models")
         } footer: {
             Text("Run your own models from the Hugging Face Hub on Apple Silicon. Downloaded weights are stored in AFM Code's container, and models support the same tools, approvals, and context handling as the on-device model.")
         }
@@ -118,7 +119,7 @@ struct SettingsView: View {
         } header: {
             Text("MCP Servers")
         } footer: {
-            Text("Add Model Context Protocol servers (npx, uvx, or any executable) whose tools join the agent's toolset. Each tool call still requires approval, and servers run inside the app sandbox.")
+            Text("Add Model Context Protocol servers (npx, uvx, or any executable) whose tools join the agent's toolset. Each tool call still requires approval, and servers run with your Mac account’s ordinary permissions.")
         }
         .sheet(isPresented: $showMCP) {
             MCPServersView()

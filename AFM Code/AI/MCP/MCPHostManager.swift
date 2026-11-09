@@ -126,7 +126,7 @@ final class MCPHostManager {
         let servers = (try? modelContext.fetch(FetchDescriptor<MCPServer>())) ?? []
         guard generation == reloadGeneration else { return }
 
-        let enabled = servers.filter(\.isEnabled)
+        let enabled = servers.filter { $0.isEnabled && $0.desktopAccessVersion == 1 }
         let enabledByID = Dictionary(enabled.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
         // Drop connections whose launch configuration changed.
@@ -140,7 +140,7 @@ final class MCPHostManager {
         }
         guard generation == reloadGeneration else { return }
 
-        for server in servers where !server.isEnabled {
+        for server in servers where !server.isEnabled || server.desktopAccessVersion != 1 {
             states[server.id] = .disabled
             persist(server, toolCount: nil, error: nil)
         }
@@ -374,8 +374,7 @@ final class MCPHostManager {
     /// Each server runs from its own scratch directory in the app
     /// container, so a server that drops files never scatters them.
     static func workingDirectory(for id: String) -> URL? {
-        guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        else { return nil }
+        guard let support = try? DesktopStorage.locations.support else { return nil }
         return support
             .appendingPathComponent("AFM Code", isDirectory: true)
             .appendingPathComponent("MCP", isDirectory: true)

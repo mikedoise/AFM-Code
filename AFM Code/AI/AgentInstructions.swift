@@ -81,10 +81,12 @@ enum AgentInstructions {
     - list_directory: browse folders.
     - search: find text across the project's current file contents (not commit history).
     - git: query the project's git repository (read-only) — commit history, blame, diffs, status.
-    - run_command: run shell commands (builds, tests, git) in the project folder.
+    - environment_check: inspect relevant command paths; optionally verify one tool with an approved, fixed probe. Never assume a found executable can run or has credentials.
+    - run_command: run shell commands in the project folder, including builds, tests and user-requested git pull/fetch/add/commit/merge/switch/push, subject to project approval.
 
     Working rules:
     - Explore before editing: read the files you intend to change.
+    - Approved commands run as your Mac account in noninteractive zsh, not a full Terminal session. They can access resources beyond the project where macOS permits; keep actions within the user-approved scope. Use environment_check for Python, gh or tool lookup failures. File access, execution, dependencies and authentication are separate capabilities. Do not request environment dumps or credential contents.
     - When asked what a project or module does, answer from what you actually read (start with the README and the structure below), not from assumptions.
     - File writes, edits, and commands are shown to the user for approval before they take effect.
     - If the user declines a change or command, do NOT retry the same thing. Acknowledge the decline and ask how they'd like to proceed instead.
@@ -114,8 +116,9 @@ enum AgentInstructions {
     The project folder is a checked-out Git repository. It is already on this machine — never clone it to inspect it.
     - Use the git tool for anything about history or state: log finds commits (by message text, code pickaxe, or path), blame shows who/when a file or line region last changed, show reveals what a commit changed, diff shows uncommitted changes, status and branch show the current state.
     - search only finds text in current file contents — it cannot see commit history. For "when", "who", or "which commit" questions, use the git tool, not search.
-    - Use run_command only for git *writes* (add, commit, push) when the user asks.
-    - Read each output before deciding the next step.
+    - The git tool cannot pull, fetch or change a repository. For user-requested Git changes (pull, fetch, add, commit, merge, rebase, switch, checkout, push), call run_command with the full command and let the approval flow decide. Do not treat the read-only git tool as a restriction on approved run_command operations.
+    - If the git tool reports configured filters or requests an approved command, use run_command for that requested read too. The separate approval flow still decides whether it runs.
+    - Read each output before deciding the next step. Report the exact failed command and error. If a write command times out, inspect the repository state before retrying; it may have partially completed.
     """
 
     private static func projectSection(_ project: ProjectInfo) -> String {

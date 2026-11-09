@@ -6,52 +6,73 @@ import AppKit
 
 @main
 struct AFMCodeApp: App {
-    @State private var chat = ChatController()
-    @State private var workspaces = WorkspaceStore()
-    @State private var settings = AppSettings()
-    @State private var mlx: MLXModelManager
-    @State private var catalog: ModelCatalog
-    @State private var mcp: MCPHostManager
+    @State private var chat: ChatController?
+    @State private var workspaces: WorkspaceStore?
+    @State private var settings: AppSettings?
+    @State private var mlx: MLXModelManager?
+    @State private var catalog: ModelCatalog?
+    @State private var mcp: MCPHostManager?
+    @State private var startupError: String?
 
-    // Built here (not in property initializers) because the catalog
-    // needs the MLX manager, and a @State property's default value can't
-    // reference a sibling property.
     init() {
-        let context = ModelContainerProvider.container.mainContext
-        let mlxManager = MLXModelManager(modelContext: context)
-        _mlx = State(initialValue: mlxManager)
-        _catalog = State(initialValue: ModelCatalog(modelContext: context, mlx: mlxManager))
-        _mcp = State(initialValue: MCPHostManager(modelContext: context))
+        do {
+            // Never migrate a store while another app instance may be using its
+            // old schema or approval settings. Do not terminate that instance.
+            let others = NSRunningApplication.runningApplications(withBundleIdentifier: DesktopStorage.bundleID)
+                .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+            guard others.isEmpty else {
+                throw NSError(domain: "AFMDesktopStartup", code: 1, userInfo: [NSLocalizedDescriptionKey: "Close the other AFM Code instance, then reopen this build. Your existing data has not been migrated or reset."])
+            }
+            let context = try ModelContainerProvider.containerResult.get().mainContext
+            let mlxManager = MLXModelManager(modelContext: context)
+            _chat = State(initialValue: ChatController())
+            _workspaces = State(initialValue: WorkspaceStore())
+            _settings = State(initialValue: AppSettings())
+            _mlx = State(initialValue: mlxManager)
+            _catalog = State(initialValue: ModelCatalog(modelContext: context, mlx: mlxManager))
+            _mcp = State(initialValue: MCPHostManager(modelContext: context))
+        } catch {
+            _startupError = State(initialValue: error.localizedDescription)
+        }
     }
 
     var body: some Scene {
         WindowGroup {
-            RootView()
-                .environment(catalog)
-                .environment(chat)
-                .environment(workspaces)
-                .environment(settings)
-                .environment(mlx)
-                .environment(mcp)
-                .modelContainer(ModelContainerProvider.container)
-                .frame(minWidth: 860, minHeight: 540)
-                .task {
-                    await catalog.probe()
-                    await catalog.refreshMlxModels()
-                }
+            if let catalog, let chat, let workspaces, let settings, let mlx, let mcp {
+                RootView()
+                    .environment(catalog).environment(chat).environment(workspaces)
+                    .environment(settings).environment(mlx).environment(mcp)
+                    .modelContainer(ModelContainerProvider.container)
+                    .frame(minWidth: 860, minHeight: 540)
+                    .task {
+                        await catalog.probe()
+                        await catalog.refreshMlxModels()
+                    }
+            } else { startupFailure }
         }
         .defaultSize(width: 1280, height: 800)
-        .commands {
-            SessionCommands()
-        }
+        .commands { SessionCommands() }
         Settings {
-            SettingsView()
-                .environment(catalog)
-                .environment(settings)
-                .environment(mlx)
-                .environment(mcp)
+            if let catalog, let settings, let mlx, let mcp {
+                SettingsView()
+                    .modelContainer(ModelContainerProvider.container)
+                    .environment(catalog).environment(settings).environment(mlx).environment(mcp)
+            } else { startupFailure }
         }
     }
+
+    private var startupFailure: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("AFM Code could not open its existing data", systemImage: "exclamationmark.triangle")
+                .font(.headline)
+            Text(startupError ?? "Storage preparation failed.").textSelection(.enabled)
+            Text("No replacement database was opened. Close other AFM Code instances and check access to the existing app data before reopening. Do not delete the store to fix this error.")
+        }
+        .padding(24)
+        .frame(minWidth: 520, minHeight: 220)
+        .accessibilityElement(children: .combine)
+    }
+
 }
 
 /// The keyboard commands, mirroring Perspective Intelligence's

@@ -34,8 +34,9 @@ final class MLXModelManager {
     /// Where downloaded weights live: the app container's
     /// Application Support directory, in a `Hub` subfolder.
     static var cacheDirectory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
+        // Startup prepares this location before constructing any managers.
+        // Never fall back to a fresh cache when legacy storage is inaccessible.
+        let base = try! DesktopStorage.locations.support
         return base.appendingPathComponent("Hub", isDirectory: true)
     }
 

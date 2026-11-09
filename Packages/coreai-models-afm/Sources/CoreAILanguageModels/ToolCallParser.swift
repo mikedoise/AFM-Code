@@ -1,0 +1,470 @@
+// Copyright 2026 Apple Inc.
+//
+// Use of this source code is governed by a BSD-3-clause license that can
+// be found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
+import Foundation
+import Tokenizers
+
+/// Streaming parser that detects tool call blocks in the model's token stream.
+public struct ToolCallParser: Sendable {
+    public enum Event {
+        case text(String)
+        case toolCall(id: String, name: String, argsJSON: String)
+    }
+
+    public enum Format: Sendable, Equatable {
+        case json
+        case atem
+        /// Qwen3-Coder style: `<function=NAME><parameter=K>V</parameter>…</function>` inside the markers.
+        case xmlFunction
+        /// Gemma 4: `call:NAME{key:<|"|>value<|"|>}`.
+        case gemma
+    }
+
+    private let openMarker: String
+    private let closeMarker: String
+    private let format: Format
+    private var buffer: String = ""
+    private var isInsideToolCall: Bool = false
+
+    public init(
+        openMarker: String = "<tool_call>",
+        closeMarker: String = "</tool_call>",
+        format: Format = .json
+    ) {
+        self.openMarker = openMarker
+        self.closeMarker = closeMarker
+        self.format = format
+    }
+
+    public mutating func consume(_ delta: String) -> [Event] {
+        buffer.append(delta)
+        return drain(isFinal: false)
+    }
+
+    /// Emit any pending buffered content as final events.
+    ///
+    /// Required at end of stream — without it, text held back to wait for a
+    /// possible marker match is silently lost. An unclosed `<tool_call>` block
+    /// at EOS is dropped (malformed JSON is not useful to surface as text).
+    /// Exception: newline-terminated formats (e.g. Mistral's `[TOOL_CALLS]`)
+    /// have no trailing close token, so the buffered content is parsed on EOS.
+    public mutating func flush() -> [Event] {
+        drain(isFinal: true)
+    }
+
+    /// Gemma's special tokens can also occur literally inside a raw argument
+    /// string. The text adapter must not treat those token IDs as EOS there.
+    var isInsideGemmaString: Bool {
+        guard format == .gemma, isInsideToolCall else { return false }
+        return buffer.components(separatedBy: "<|\"|>").count.isMultiple(of: 2)
+    }
+
+    private mutating func drain(isFinal: Bool) -> [Event] {
+        var events: [Event] = []
+        while let range = nextMarkerRange() {
+            processMarker(at: range, events: &events)
+            isInsideToolCall.toggle()
+        }
+        processRemainder(of: &events, isFinal: isFinal)
+        return events
+    }
+
+    /// Gemma strings are raw, special-token-delimited strings. A marker inside
+    /// one is argument text, not framing. Rescan the buffered block so split
+    /// string delimiters and split close markers have identical semantics.
+    private func nextMarkerRange() -> Range<String.Index>? {
+        guard isInsideToolCall, format == .gemma else {
+            return buffer.range(of: isInsideToolCall ? closeMarker : openMarker)
+        }
+        var index = buffer.startIndex
+        var inString = false
+        let quote = "<|\"|>"
+        while index < buffer.endIndex {
+            if buffer[index...].hasPrefix(quote) {
+                inString.toggle()
+                index = buffer.index(index, offsetBy: quote.count)
+            } else if !inString && buffer[index...].hasPrefix(closeMarker) {
+                return index..<buffer.index(index, offsetBy: closeMarker.count)
+            } else {
+                index = buffer.index(after: index)
+            }
+        }
+        return nil
+    }
+
+    private mutating func processMarker(at range: Range<String.Index>, events: inout [Event]) {
+        let before = String(buffer[buffer.startIndex..<range.lowerBound])
+        if isInsideToolCall {
+            events.append(contentsOf: parseToolCalls(from: before))
+        } else if !before.isEmpty {
+            events.append(.text(before))
+        }
+        buffer = String(buffer[range.upperBound...])
+    }
+
+    private mutating func processRemainder(of events: inout [Event], isFinal: Bool) {
+        if isInsideToolCall {
+            guard isFinal else { return }
+            if closeMarker == "\n" {
+                events.append(contentsOf: parseToolCalls(from: buffer))
+            }
+            buffer = ""
+        } else {
+            let safe = isFinal ? buffer.endIndex : lastSafeIndex(in: buffer, forTag: openMarker)
+            if safe > buffer.startIndex {
+                let toEmit = String(buffer[buffer.startIndex..<safe])
+                if !toEmit.isEmpty { events.append(.text(toEmit)) }
+                buffer = String(buffer[safe...])
+            }
+        }
+    }
+
+    private func parseToolCalls(from content: String) -> [Event] {
+        switch format {
+        case .json:
+            // Qwen3-Coder shares Qwen3's `<tool_call>` markers, so it detects as `.json`.
+            // Try JSON first; only fall back to XML `<function=…>` if JSON yields no call.
+            // Attempting JSON first avoids misrouting a JSON call whose arg text contains
+            // `<function=`.
+            let jsonEvents = parseJSONToolCalls(from: content)
+            return jsonEvents.isEmpty ? parseXMLFunctionToolCalls(from: content) : jsonEvents
+        case .gemma:
+            var parser = GemmaToolCallBodyParser(content)
+            guard let call = parser.parse() else { return [] }
+            return [
+                .toolCall(
+                    id: "call_\(UUID().uuidString.prefix(8).lowercased())",
+                    name: call.name, argsJSON: call.arguments)
+            ]
+        case .atem:
+            return parseATEMToolCalls(from: content)
+        case .xmlFunction:
+            return parseXMLFunctionToolCalls(from: content)
+        }
+    }
+
+    // MARK: - JSON Format
+
+    /// Single object `{"name":..}` (Qwen3) or array `[{"name":..},..]` (Mistral).
+    private func parseJSONToolCalls(from json: String) -> [Event] {
+        let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8) else { return [] }
+
+        if trimmed.hasPrefix("["),
+            let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        {
+            return array.compactMap { makeJSONToolCallEvent(from: $0) }
+        }
+
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return makeJSONToolCallEvent(from: obj).map { [$0] } ?? []
+        }
+
+        return []
+    }
+
+    private func makeJSONToolCallEvent(from obj: [String: Any]) -> Event? {
+        guard let name = obj["name"] as? String else { return nil }
+
+        let argsJSON: String
+        if let argsDict = obj["arguments"] as? [String: Any],
+            let argsData = try? JSONSerialization.data(withJSONObject: argsDict),
+            let argsStr = String(data: argsData, encoding: .utf8)
+        {
+            argsJSON = argsStr
+        } else if let argsStr = obj["arguments"] as? String {
+            argsJSON = argsStr
+        } else {
+            argsJSON = "{}"
+        }
+
+        let callId = "call_\(UUID().uuidString.prefix(8).lowercased())"
+        return .toolCall(id: callId, name: name, argsJSON: argsJSON)
+    }
+
+    // MARK: - ATEM Format
+
+    /// Parse `<atem:invoke name="fn"><atem:parameter name="k">v</atem:parameter></atem:invoke>` blocks.
+    private func parseATEMToolCalls(from xml: String) -> [Event] {
+        let invokePattern = "<atem:invoke\\s+name=\"([^\"]+)\"[^>]*>(.*?)</atem:invoke>"
+        guard let invokeRegex = try? NSRegularExpression(pattern: invokePattern, options: .dotMatchesLineSeparators)
+        else { return [] }
+
+        let nsString = xml as NSString
+        let matches = invokeRegex.matches(in: xml, range: NSRange(location: 0, length: nsString.length))
+
+        return matches.compactMap { match -> Event? in
+            guard match.numberOfRanges >= 3 else { return nil }
+            let name = nsString.substring(with: match.range(at: 1))
+            let body = nsString.substring(with: match.range(at: 2))
+            let args = parseATEMParameters(from: body)
+            let argsJSON: String
+            if args.isEmpty {
+                argsJSON = "{}"
+            } else if let data = try? JSONSerialization.data(withJSONObject: args),
+                let str = String(data: data, encoding: .utf8)
+            {
+                argsJSON = str
+            } else {
+                argsJSON = "{}"
+            }
+            let callId = "call_\(UUID().uuidString.prefix(8).lowercased())"
+            return .toolCall(id: callId, name: name, argsJSON: argsJSON)
+        }
+    }
+
+    private func parseATEMParameters(from body: String) -> [String: Any] {
+        let paramPattern = "<atem:parameter\\s+name=\"([^\"]+)\">(.*?)</atem:parameter>"
+        guard let paramRegex = try? NSRegularExpression(pattern: paramPattern, options: .dotMatchesLineSeparators)
+        else { return [:] }
+
+        let nsBody = body as NSString
+        let matches = paramRegex.matches(in: body, range: NSRange(location: 0, length: nsBody.length))
+
+        var result: [String: Any] = [:]
+        for match in matches {
+            guard match.numberOfRanges >= 3 else { continue }
+            let key = nsBody.substring(with: match.range(at: 1))
+            let rawValue = nsBody.substring(with: match.range(at: 2))
+            result[key] = coerceATEMValue(rawValue)
+        }
+        return result
+    }
+
+    private func coerceATEMValue(_ raw: String) -> Any {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "true" { return true }
+        if trimmed == "false" { return false }
+        if let intVal = Int(trimmed) { return intVal }
+        if let doubleVal = Double(trimmed), trimmed.contains(".") { return doubleVal }
+        return trimmed
+    }
+
+    // MARK: - XML Function Format (Qwen3-Coder)
+
+    /// Parse `<function=NAME><parameter=K>V</parameter>…</function>` blocks (Qwen3-Coder).
+    /// Values are coerced to bool/Int/Double/array/object so JSON-schema types survive.
+    private func parseXMLFunctionToolCalls(from xml: String) -> [Event] {
+        let fnPattern = "<function=([^>]+)>(.*?)</function>"
+        guard let fnRegex = try? NSRegularExpression(pattern: fnPattern, options: .dotMatchesLineSeparators)
+        else { return [] }
+
+        let nsString = xml as NSString
+        let matches = fnRegex.matches(in: xml, range: NSRange(location: 0, length: nsString.length))
+
+        return matches.compactMap { match -> Event? in
+            guard match.numberOfRanges >= 3 else { return nil }
+            let name = nsString.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let body = nsString.substring(with: match.range(at: 2))
+            let argsJSON = jsonString(from: parseXMLFunctionParameters(from: body))
+            let callId = "call_\(UUID().uuidString.prefix(8).lowercased())"
+            return .toolCall(id: callId, name: name, argsJSON: argsJSON)
+        }
+    }
+
+    private func parseXMLFunctionParameters(from body: String) -> [String: Any] {
+        let paramPattern = "<parameter=([^>]+)>(.*?)</parameter>"
+        guard let paramRegex = try? NSRegularExpression(pattern: paramPattern, options: .dotMatchesLineSeparators)
+        else { return [:] }
+
+        let nsBody = body as NSString
+        let matches = paramRegex.matches(in: body, range: NSRange(location: 0, length: nsBody.length))
+
+        var result: [String: Any] = [:]
+        for match in matches where match.numberOfRanges >= 3 {
+            let key = nsBody.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = nsBody.substring(with: match.range(at: 2))
+            result[key] = coerceXMLFunctionValue(value)
+        }
+        return result
+    }
+
+    /// Scalar coercion (bool/Int/Double/String) plus JSON array/object bodies for list/dict args.
+    private func coerceXMLFunctionValue(_ raw: String) -> Any {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("[") || trimmed.hasPrefix("{"),
+            let data = trimmed.data(using: .utf8),
+            let json = try? JSONSerialization.jsonObject(with: data)
+        {
+            return json
+        }
+        return coerceATEMValue(trimmed)
+    }
+
+    /// Deterministic JSON object string (sorted keys) from coerced args.
+    private func jsonString(from dict: [String: Any]) -> String {
+        guard !dict.isEmpty,
+            let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
+            let str = String(data: data, encoding: .utf8)
+        else { return "{}" }
+        return str
+    }
+}
+
+// MARK: - Tool Call Marker Detection
+
+public struct ToolCallDetection: Sendable {
+    public let openMarker: String
+    public let closeMarker: String
+    public let format: ToolCallParser.Format
+    /// Whether the chat template renders tools from a system message's `tools` key (e.g. Phi)
+    /// rather than the top-level `tools` variable (e.g. Qwen3).
+    public let toolsInSystemMessage: Bool
+
+    public init(
+        openMarker: String,
+        closeMarker: String,
+        format: ToolCallParser.Format,
+        toolsInSystemMessage: Bool = false
+    ) {
+        self.openMarker = openMarker
+        self.closeMarker = closeMarker
+        self.format = format
+        self.toolsInSystemMessage = toolsInSystemMessage
+    }
+}
+
+/// Injects the tools JSON into a system message for dialects whose chat template reads
+/// `message['tools']` (e.g. Phi). Attaches to an existing system message, else synthesizes a
+/// leading one. Gate the call on `toolsInSystemMessage` so top-level-`tools` families (e.g. Qwen3)
+/// are not perturbed by a synthetic system message.
+/// Serializes tool specs to a JSON string for the `applyToolsToSystemMessage` injection.
+/// Keys are sorted so the server and FM paths produce identical output.
+public func toolsJSONForSystemMessage(_ toolSpecs: [[String: any Sendable]]) -> String? {
+    guard
+        let data = try? JSONSerialization.data(withJSONObject: toolSpecs, options: [.sortedKeys]),
+        let json = String(data: data, encoding: .utf8)
+    else { return nil }
+    return json
+}
+
+public func applyToolsToSystemMessage(
+    _ messages: [[String: any Sendable]],
+    toolsJSON: String
+) -> [[String: any Sendable]] {
+    var out = messages
+    if let idx = out.firstIndex(where: { ($0["role"] as? String) == "system" }) {
+        out[idx]["tools"] = toolsJSON
+    } else {
+        // Content is empty by design: Phi's template renders a system message's tools as
+        // "<|system|>{content}<|tool|>{tools}<|/tool|>", so the tools carry the payload and the
+        // content adds nothing. Empty string (not nil) concatenates cleanly in the template.
+        out.insert(["role": "system", "content": "", "tools": toolsJSON], at: 0)
+    }
+    return out
+}
+
+/// Attaches tool specs to a system message when the detected dialect reads `message['tools']`
+/// (e.g. Phi). No-op when no specs, no detection, or the dialect uses top-level `tools` (e.g.
+/// Qwen3). Shared by the server (ChatHandler) and FM (CoreAILanguageModel) prompt-building paths.
+public func injectToolsIntoSystemMessageIfNeeded(
+    _ messages: [[String: any Sendable]],
+    toolSpecs: [[String: any Sendable]]?,
+    detection: ToolCallDetection?
+) -> [[String: any Sendable]] {
+    guard let toolSpecs, detection?.toolsInSystemMessage == true,
+        let toolsJSON = toolsJSONForSystemMessage(toolSpecs)
+    else { return messages }
+    return applyToolsToSystemMessage(messages, toolsJSON: toolsJSON)
+}
+
+/// Probes a tokenizer's vocabulary for known tool-call special tokens.
+public func detectToolCallFormat(using tokenizer: any Tokenizer) -> ToolCallDetection? {
+    // Gemma 4 uses asymmetric markers and a non-JSON argument grammar.
+    if tokenizer.vocabContains("<|tool_call>"), tokenizer.vocabContains("<tool_call|>") {
+        return ToolCallDetection(openMarker: "<|tool_call>", closeMarker: "<tool_call|>", format: .gemma)
+    }
+
+    // ATEM special tokens (if a future tokenizer adds them)
+    if tokenizer.vocabContains("<atem:function_calls>"),
+        tokenizer.vocabContains("</atem:function_calls>")
+    {
+        return ToolCallDetection(
+            openMarker: "<atem:function_calls>",
+            closeMarker: "</atem:function_calls>",
+            format: .atem
+        )
+    }
+
+    // ATEM via agentic model signature: <|eom|> + <|eot|> + <|start|> + <|message|>
+    // indicate a Meta agentic model that emits ATEM tags as regular text.
+    if tokenizer.vocabContains("<|eom|>"),
+        tokenizer.vocabContains("<|eot|>"),
+        tokenizer.vocabContains("<|start|>"),
+        tokenizer.vocabContains("<|message|>")
+    {
+        return ToolCallDetection(
+            openMarker: "<atem:function_calls>",
+            closeMarker: "</atem:function_calls>",
+            format: .atem
+        )
+    }
+
+    // `toolsInSystem`: Phi's template reads tools from the system message; other JSON dialects
+    // use the top-level `tools` variable.
+    let tagPairs: [(open: String, close: String, toolsInSystem: Bool)] = [
+        ("<tool_call>", "</tool_call>", false),
+        ("<|tool_call|>", "<|/tool_call|>", true),
+        ("<function_calls>", "</function_calls>", false),
+    ]
+    for pair in tagPairs
+    where tokenizer.vocabContains(pair.open)
+        && tokenizer.vocabContains(pair.close)
+    {
+        return ToolCallDetection(
+            openMarker: pair.open, closeMarker: pair.close, format: .json,
+            toolsInSystemMessage: pair.toolsInSystem)
+    }
+    if tokenizer.vocabContains("[TOOL_CALLS]") {
+        return ToolCallDetection(openMarker: "[TOOL_CALLS]", closeMarker: "\n", format: .json)
+    }
+    return nil
+}
+
+// MARK: - Thinking Format Detection
+
+/// Probes a tokenizer's vocabulary for thinking/reasoning markers.
+public func detectThinkingFormat(using tokenizer: any Tokenizer) -> ThinkTagParser.Format {
+    if tokenizer.vocabContains("<|eom|>"),
+        tokenizer.vocabContains("<|eot|>"),
+        tokenizer.vocabContains("<|message|>")
+    {
+        return .agentic(
+            selfMarker: "to=self<|message|>",
+            userMarker: "to=user<|message|>",
+            endOfMessage: "<|eom|>",
+            endOfTurn: "<|eot|>"
+        )
+    }
+
+    let candidates: [(open: String, close: String)] = [
+        ("<think>", "</think>"),
+        ("<|reasoning_start|>", "<|reasoning_end|>"),
+    ]
+    for pair in candidates {
+        if tokenizer.vocabContains(pair.open),
+            tokenizer.vocabContains(pair.close)
+        {
+            return .tagPair(open: pair.open, close: pair.close)
+        }
+    }
+    return .tagPair(open: "<think>", close: "</think>")
+}
+
+/// Turn-end token ID for an agentic thinking format, or nil.
+///
+/// Agentic models stop on `<|eot|>` so a runner doesn't loop self->user turns.
+/// Returns the id only when the format is `.agentic` and its `endOfTurn` token
+/// is a genuine vocabulary entry.
+public func agenticEndOfTurnTokenId(
+    thinkingFormat: ThinkTagParser.Format,
+    tokenizer: any Tokenizer
+) -> Int32? {
+    guard case .agentic(_, _, _, let eot) = thinkingFormat,
+        tokenizer.vocabContains(eot),
+        let id = tokenizer.convertTokenToId(eot)
+    else { return nil }
+    return Int32(id)
+}

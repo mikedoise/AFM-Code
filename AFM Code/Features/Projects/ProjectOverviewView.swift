@@ -152,7 +152,7 @@ struct ProjectOverviewView: View {
                 #if os(macOS)
                 if let url = ProjectPicker.run() {
                     project.folderName = url.lastPathComponent
-                    project.bookmarkData = try? url.bookmarkData(options: .withSecurityScope)
+                    project.bookmarkData = try? url.bookmarkData(options: [])
                     try? modelContext.save()
                     workspace.refresh()
                 }
@@ -193,9 +193,11 @@ struct ProjectOverviewView: View {
                     Text(mode.label).tag(Optional(mode))
                 }
             }
-            .help("Auto-approve runs file changes and commands without an approval card. Useful for trusted or scratch projects; the command allowlist still applies.")
+            .help("Auto-approve runs file changes and commands without an approval card. Commands have normal Mac account access, including beyond this project. Only enable for a trusted project.")
         } header: {
             Text("Settings")
+        } footer: {
+            Text("Desktop commands use your Mac account permissions. Previous sandbox automatic approvals are inactive; review and approve new commands. File tools still stay inside this project.")
         }
     }
 
@@ -235,6 +237,8 @@ struct ProjectOverviewView: View {
                 .afmCore
             case .afmCoreAdvanced:
                 .afmCoreAdvanced
+            case .coreAI:
+                descriptor.coreAIModelID.map { ModelSelection.coreAI(id: $0) }
             case .mlx:
                 descriptor.mlxRepoID.map { ModelSelection.mlx(repoID: $0) }
             }
@@ -256,6 +260,8 @@ struct ProjectOverviewView: View {
             return catalog.descriptor(for: .afmCore)?.displayName ?? "AFM 3 Core"
         case .afmCoreAdvanced:
             return catalog.descriptor(for: .afmCoreAdvanced)?.displayName ?? "AFM 3 Core Advanced"
+        case .coreAI(let id):
+            return catalog.coreAI.descriptor(id: id)?.displayName ?? "Missing Core AI model"
         case .mlx(let repoID):
             return catalog.descriptor(for: .mlx, mlxRepoID: repoID)?.displayName ?? repoID
         }
@@ -270,7 +276,7 @@ struct ProjectOverviewView: View {
                     Image(systemName: "terminal")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(command)
+                    Text(ToolApprovalService.displayPermission(command))
                         .font(.system(.callout, design: .monospaced))
                         .textSelection(.enabled)
                         .lineLimit(1)

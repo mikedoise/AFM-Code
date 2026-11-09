@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// Resolves a project's folder from its security-scoped bookmark and
+/// Resolves legacy scoped and ordinary desktop bookmarks and
 /// tracks whether the folder is still there.
 ///
 /// Phase 2 uses this for status checks only (short leases). Phase 3's
@@ -37,19 +37,15 @@ final class Workspace {
             return
         }
         var isStale: Bool = false
-        guard let url = try? URL(
-            resolvingBookmarkData: data,
-            options: [.withSecurityScope, .withoutUI],
-            relativeTo: nil,
-            bookmarkDataIsStale: &isStale
-        ) else {
+        let scoped = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI], relativeTo: nil, bookmarkDataIsStale: &isStale)
+        guard let url = scoped ?? (try? URL(resolvingBookmarkData: data, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)) else {
             status = .bookmarkInvalid
             return
         }
 
         let accessed = url.startAccessingSecurityScopedResource()
         isAccessing = accessed
-        let exists = accessed && FileManager.default.fileExists(atPath: url.path)
+        let exists = FileManager.default.isReadableFile(atPath: url.path)
         let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
         releaseLease()
 
@@ -65,7 +61,7 @@ final class Workspace {
         defer {
             if accessed { url.stopAccessingSecurityScopedResource() }
         }
-        guard accessed else { return nil }
+        guard Self.isAccessibleDirectory(url) else { return nil }
         return try operation(url)
     }
 
@@ -77,7 +73,12 @@ final class Workspace {
         guard let url = folderURL else { return false }
         let accessed = url.startAccessingSecurityScopedResource()
         isAccessing = accessed
-        return accessed
+        return Self.isAccessibleDirectory(url)
+    }
+
+    private static func isAccessibleDirectory(_ url: URL) -> Bool {
+        FileManager.default.isReadableFile(atPath: url.path)
+            && ((try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true)
     }
 
     func releaseLease() {

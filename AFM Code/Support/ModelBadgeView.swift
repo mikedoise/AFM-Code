@@ -1,42 +1,38 @@
 import SwiftUI
 
-/// Compact status pill for the detected on-device model,
-/// shown in the sidebar footer, composer, and empty state.
+/// Explicit per-selection status. Never substitutes the first catalog model.
 struct ModelBadgeView: View {
-    @Environment(ModelCatalog.self) private var catalog
+    let status: ModelStatus
+
+    private var color: Color {
+        switch status.state {
+        case .loaded, .inUse: .green
+        case .preparing: .accentColor
+        case .failed: .red
+        case .unavailable: .orange
+        case .selected: .secondary
+        }
+    }
 
     var body: some View {
-        if let model = catalog.activeDescriptor {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(.green)
-                    .frame(width: 7, height: 7)
-                    .accessibilityHidden(true)
-                Text(model.displayName)
-                    .font(.caption.weight(.medium))
-                if let contextSize = model.contextSize {
-                    Text("· \(Self.compact(contextSize)) ctx")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+        HStack(spacing: 6) {
+            if status.state == .preparing {
+                ProgressView().controlSize(.mini).accessibilityHidden(true)
+            } else {
+                Circle().fill(color).frame(width: 7, height: 7).accessibilityHidden(true)
             }
-            .lineLimit(1)
-            .help(Self.helpText(for: model))
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(
-                model.contextSize.map {
-                    "Active model \(model.displayName), \(Self.compact($0)) token context"
-                } ?? "Active model \(model.displayName)"
-            )
-        } else if let detail = catalog.descriptors.first?.availabilityDetail {
-            Label(detail, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .lineLimit(2)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Model unavailable")
-                .accessibilityValue(detail)
+            Text(status.name).font(.caption.weight(.medium)).truncationMode(.middle)
+            Text("· " + status.label).font(.caption).foregroundStyle(.secondary)
         }
+        .lineLimit(1)
+        .help([status.name, status.detail, status.model.map(Self.helpText)].compactMap { $0 }.joined(separator: "\n"))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(status.accessibilityLabel)
+        .accessibilityValue([
+            status.detail,
+            (status.model?.contextSize).map { "\(Self.compact($0)) token context" }
+        ].compactMap { $0 }.joined(separator: ". "))
+        .accessibilityAddTraits(.updatesFrequently)
     }
 
     static func helpText(for model: ModelDescriptor) -> String {

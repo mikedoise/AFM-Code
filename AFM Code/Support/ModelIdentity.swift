@@ -49,6 +49,8 @@ enum ModelIdentityPalette {
             return styles[0] // sparkles, purple to blue — the on-device signature
         case .afmCoreAdvanced:
             return styles[2] // globe, cyan to blue
+        case .coreAI:
+            return styles[5]
         case .mlx:
             return styles[6] // generic MLX
         }

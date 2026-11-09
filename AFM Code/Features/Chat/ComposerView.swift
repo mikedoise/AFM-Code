@@ -26,7 +26,7 @@ struct ComposerView: View {
     /// guard can read it.
     var focus: FocusState<Bool>.Binding
 
-    private var model: ModelDescriptor? { engine?.activeModel ?? catalog.activeDescriptor }
+    private var model: ModelDescriptor? { engine?.activeModel ?? catalog.selectedDescriptor(for: session) }
 
     private var isBusy: Bool { engine?.isBusy == true }
 
@@ -71,6 +71,23 @@ struct ComposerView: View {
                 messageInputField
 
                 metadataRow
+                if engine?.isPrewarmingCoreAI == true {
+                    HStack {
+                        ProgressView().controlSize(.small).accessibilityHidden(true)
+                        Text("Preparing model in background… You can type or send while it loads.")
+                        Button("Cancel Loading") { engine?.cancelPrewarm() }
+                    }
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if let summary = engine?.coreAIPerformanceSummary, model?.kind == .coreAI {
+                    Text(summary)
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .help("First text and response are timed after model preparation. Response includes prompt processing and generation; these are wall-clock timings, not a decode-speed benchmark.")
+                        .accessibilityLabel("Last Core AI response performance: " + summary)
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -164,7 +181,7 @@ struct ComposerView: View {
 
     private var metadataRow: some View {
         HStack(spacing: 10) {
-            ModelBadgeView()
+            ModelBadgeView(status: engine?.modelStatus ?? catalog.status(for: model))
             if let size = engine?.contextSize, size > 0 {
                 let used = engine?.contextTokenCount
                 let ratio = used.map { min(Double($0) / Double(size), 1.0) } ?? 0
@@ -224,11 +241,13 @@ struct ComposerView: View {
     // MARK: - Actions
 
     private func submit() {
+        // Return-key submission must obey the same guard as the button.
+        guard canSend, let engine else { return }
         let text = draft
         let images = pendingImages
         draft = ""
         pendingImages.removeAll()
-        engine?.send(text, images: images.map { ($0.jpegData, $0.suggestedFilename) })
+        engine.send(text, images: images.map { ($0.jpegData, $0.suggestedFilename) })
     }
 
     private func contextColor(used: Int?, size: Int) -> Color {

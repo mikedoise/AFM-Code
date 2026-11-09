@@ -75,7 +75,7 @@ struct ImageAttachmentPreviewCard: View {
                 )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Remove image")
+        .accessibilityLabel("Remove image \(attachment.suggestedFilename)")
     }
 
     // MARK: - Actions

@@ -16,11 +16,17 @@ struct DiffView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            if diff.lines.count > 400 {
+                Text("Showing 400 of \(diff.lines.count) diff rows. Review all changes to inspect the complete proposal.")
+                    .font(.caption)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 7)
+            }
             Divider()
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(diff.lines.enumerated()), id: \.offset) { _, line in
-                        row(line)
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(0..<min(diff.lines.count, 400), id: \.self) { index in
+                        row(diff.lines[index])
                     }
                 }
                 .padding(8)
@@ -64,7 +70,7 @@ struct DiffView: View {
                     .foregroundStyle(.red)
             }
             if diff.truncated {
-                Text("truncated")
+                Text("Saved preview is incomplete")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -72,11 +78,12 @@ struct DiffView: View {
                 Button {
                     showFull = true
                 } label: {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    Label(diff.truncated ? "Expand saved preview" : "Review all changes", systemImage: "arrow.up.left.and.arrow.down.right")
                         .font(.caption2)
                 }
                 .buttonStyle(.plain)
-                .help("View the full diff")
+                .help(diff.truncated ? "Expand saved preview (incomplete)" : "Review all changes")
+                .accessibilityLabel(diff.truncated ? "Expand saved preview (incomplete)" : "Review all changes")
             }
         }
         .padding(.horizontal, 10)
@@ -84,7 +91,7 @@ struct DiffView: View {
     }
 
     private var showsFullButton: Bool {
-        diff.truncated || diff.lines.count > 30
+        !diff.lines.isEmpty
     }
 
     private func row(_ line: DiffData.Line) -> some View {
@@ -102,6 +109,9 @@ struct DiffView: View {
         .padding(.vertical, 1)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(background(for: line.kind))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(line.kind == .addition ? "Added line" : line.kind == .removal ? "Removed line" : "Unchanged line")
+        .accessibilityValue(line.text.isEmpty ? "Blank line" : line.text)
     }
 
     private func symbol(for kind: DiffData.LineKind) -> String {
@@ -159,7 +169,7 @@ struct DiffSheetView: View {
                         .foregroundStyle(.red)
                 }
                 if diff.truncated {
-                    Text("preview truncated")
+                    Text("Saved preview is incomplete; missing changes cannot be recovered here")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -180,9 +190,9 @@ struct DiffSheetView: View {
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(diff.lines.enumerated()), id: \.offset) { _, line in
-                        row(line)
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(diff.lines.indices, id: \.self) { index in
+                        row(diff.lines[index])
                     }
                 }
                 .padding(10)
@@ -208,6 +218,9 @@ struct DiffSheetView: View {
         .padding(.vertical, 1)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(background(for: line.kind))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(line.kind == .addition ? "Added line" : line.kind == .removal ? "Removed line" : "Unchanged line")
+        .accessibilityValue(line.text.isEmpty ? "Blank line" : line.text)
     }
 
     private func symbol(for kind: DiffData.LineKind) -> String {

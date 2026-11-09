@@ -39,32 +39,45 @@ final class ToolApprovalService {
     /// Steps currently waiting on a decision (drives the card buttons).
     private(set) var pendingStepIDs: Set<UUID> = []
     private var continuations: [UUID: CheckedContinuation<ApprovalDecision, Never>] = [:]
+    enum PermissionScope: String, Sendable { case command, mcp }
+    private struct PendingPermission { let value: String; let scope: PermissionScope }
+    private var pendingCommands: [UUID: PendingPermission] = [:]
 
     weak var project: Project?
 
-    /// Normalized commands the user has permanently allowed.
-    private(set) var commandAllowlist: [String] = []
+    /// Exact commands the user has permanently allowed.
+    private var transientCommandAllowlist: [String] = []
+    var commandAllowlist: [String] {
+        guard let project else { return transientCommandAllowlist }
+        guard project.desktopAccessVersion == 1 else { return [] }
+        return project.commandAllowlist ?? []
+    }
 
     init(project: Project?) {
         self.project = project
-        self.commandAllowlist = (project?.commandAllowlist ?? []).map(Self.normalize)
     }
 
-    /// Exact-match key for allowlist entries: trimmed, whitespace-collapsed.
+    /// Preserve shell syntax, including whitespace inside quotes. Historical
+    /// entries remain unchanged: whitespace lost by older versions cannot be
+    /// recovered. Untyped previous grants are preserved but are not honored.
     nonisolated static func normalize(_ command: String) -> String {
-        command.trimmingCharacters(in: .whitespacesAndNewlines)
-            .components(separatedBy: .whitespaces)
-            .joined(separator: " ")
+        command
     }
 
-    func commandIsAllowed(_ command: String) -> Bool {
+    nonisolated static func permissionKey(_ value: String, scope: PermissionScope = .command) -> String {
+        scope.rawValue + ":" + value
+    }
+
+    nonisolated static func displayPermission(_ value: String) -> String {
+        if value.hasPrefix("command:") { return String(value.dropFirst(8)) }
+        if value.hasPrefix("mcp:") { return "MCP tool: " + value.dropFirst(4) }
+        return "Inactive previous grant: " + value
+    }
+
+    func commandIsAllowed(_ command: String, scope: PermissionScope = .command) -> Bool {
         let normalized = Self.normalize(command)
-        guard !normalized.isEmpty else { return false }
-        return commandAllowlist.contains(normalized)
-    }
-
-    func registerPending(_ id: UUID) {
-        pendingStepIDs.insert(id)
+        guard !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return commandAllowlist.contains(Self.permissionKey(normalized, scope: scope))
     }
 
     /// Suspend until the UI decides or the turn is cancelled.
@@ -72,17 +85,25 @@ final class ToolApprovalService {
     /// Commands already on the allowlist fast-path straight through,
     /// and so does everything else when the project is set to
     /// auto-approve (a trusted project needs no round trip).
-    func wait(for id: UUID, command: String? = nil) async -> ApprovalDecision {
-        if let command, commandIsAllowed(command) {
+    func wait(for id: UUID, command: String? = nil, scope: PermissionScope = .command) async -> ApprovalDecision {
+        guard !Task.isCancelled else { return .cancelled }
+        if let command, commandIsAllowed(command, scope: scope) {
             return .alwaysAllow
         }
-        if project?.approvalMode == .auto {
+        if project?.desktopAccessVersion == 1 && project?.approvalMode == .auto {
             return .approve
         }
-        registerPending(id)
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<ApprovalDecision, Never>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: .cancelled)
+                    return
+                }
+                // Publish only after the continuation exists. A quick button
+                // press or Stop must never lose the decision and leave a waiter.
                 continuations[id] = continuation
+                pendingCommands[id] = command.map { PendingPermission(value: $0, scope: scope) }
+                pendingStepIDs.insert(id)
             }
         } onCancel: {
             Task { @MainActor [weak self] in
@@ -92,20 +113,26 @@ final class ToolApprovalService {
     }
 
     /// Called by the UI when the user picks a button.
-    func decide(_ id: UUID, _ decision: ApprovalDecision, command: String? = nil) {
+    func decide(_ id: UUID, _ decision: ApprovalDecision, command _: String? = nil) {
         pendingStepIDs.remove(id)
+        let command = pendingCommands.removeValue(forKey: id)
         guard let continuation = continuations.removeValue(forKey: id) else { return }
         if decision == .alwaysAllow, let command {
-            rememberCommand(command)
+            rememberCommand(command.value, scope: command.scope)
         }
         continuation.resume(returning: decision)
     }
 
-    private func rememberCommand(_ command: String) {
+    private func rememberCommand(_ command: String, scope: PermissionScope) {
         let normalized = Self.normalize(command)
-        guard !normalized.isEmpty, !commandAllowlist.contains(normalized) else { return }
-        commandAllowlist.append(normalized)
-        project?.commandAllowlist = commandAllowlist
+        let permission = Self.permissionKey(normalized, scope: scope)
+        guard !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !commandAllowlist.contains(permission) else { return }
+        // Read the live project list so revocations in Settings apply to an
+        // already-open conversation, and new grants do not restore old ones.
+        var updated = commandAllowlist
+        updated.append(permission)
+        if let project { project.commandAllowlist = updated }
+        else { transientCommandAllowlist = updated }
     }
 
     /// Drop everything left over after a turn ends. Steps are already
@@ -115,6 +142,7 @@ final class ToolApprovalService {
             continuation.resume(returning: .cancelled)
         }
         continuations.removeAll()
+        pendingCommands.removeAll()
         pendingStepIDs.removeAll()
     }
 }

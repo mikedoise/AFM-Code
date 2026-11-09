@@ -1,0 +1,503 @@
+// Copyright 2026 Apple Inc.
+//
+// Use of this source code is governed by a BSD-3-clause license that can
+// be found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
+import CoreAIShared
+import CoreGraphics
+import Foundation
+import Synchronization
+
+// MARK: - Inference Output
+
+#if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
+public typealias LogitsScalarType = Float16
+#else
+public typealias LogitsScalarType = Float
+#endif
+
+/// Single step output from `InferenceEngine.generate()`.
+/// Contains the sampled token and optionally raw logits.
+public struct InferenceOutput: Sendable {
+    public let tokenId: Int32
+
+    /// Populated when `InferenceOptions.logits` is not `.none`. Shape: [vocabSize].
+    public let logits: [LogitsScalarType]?
+
+    public init(tokenId: Int32, logits: [LogitsScalarType]? = nil) {
+        self.tokenId = tokenId
+        self.logits = logits
+    }
+}
+
+// MARK: - Inference Options
+
+/// Whether the engine samples a token each step.
+///
+/// Engines currently sample under both cases. `.none` marks requests whose caller does not
+/// read `InferenceOutput.tokenId`.
+public enum TokenRequest: Sendable, Equatable {
+    case none
+    case sample
+}
+
+/// Which positions' logits the engine returns.
+///
+/// Engines currently return one `[vocabSize]` row per output step for both `.lastPosition` and
+/// `.allPositions`. The pipelined engine rejects any value other than `.none`.
+public enum LogitsRequest: Sendable, Equatable {
+    case none
+    case lastPosition
+    case allPositions
+}
+
+/// Controls what the engine produces and how much.
+public struct InferenceOptions: Sendable {
+    /// Max tokens to generate. Nil = until EOS or context limit.
+    public var maxTokens: Int?
+    /// Whether to sample a token each step. Default `.sample`.
+    public var tokens: TokenRequest
+    /// Which positions' logits to return. Default `.none`.
+    public var logits: LogitsRequest
+    /// Force these token IDs instead of sampling (MMLU-style scoring).
+    public var forcedContinuation: [Int32]?
+
+    /// Creates options from explicit `tokens` and `logits` values. Every pair is valid; prefer the
+    /// presets below.
+    public init(
+        maxTokens: Int? = nil,
+        tokens: TokenRequest = .sample,
+        logits: LogitsRequest = .none,
+        forcedContinuation: [Int32]? = nil
+    ) {
+        self.maxTokens = maxTokens
+        self.tokens = tokens
+        self.logits = logits
+        self.forcedContinuation = forcedContinuation
+    }
+
+    /// Creates options from the legacy `includeLogits` flag: `true` maps to `logits: .lastPosition`,
+    /// `false` to `logits: .none`. `tokens` is `.sample`.
+    @available(
+        *, deprecated,
+        message: "Use the tokens:/logits: initializer; includeLogits: true == logits: .lastPosition."
+    )
+    public init(
+        maxTokens: Int? = nil,
+        includeLogits: Bool,
+        forcedContinuation: [Int32]? = nil
+    ) {
+        self.init(
+            maxTokens: maxTokens,
+            tokens: .sample,
+            logits: includeLogits ? .lastPosition : .none,
+            forcedContinuation: forcedContinuation)
+    }
+
+    /// Whether `logits` is anything other than `.none`.
+    public var returnsLogits: Bool { logits != .none }
+
+    /// Legacy flag. Reads `returnsLogits`; writing `true` sets `logits` to `.lastPosition`, `false`
+    /// to `.none`.
+    @available(*, deprecated, message: "Use `logits` / `returnsLogits` instead.")
+    public var includeLogits: Bool {
+        get { returnsLogits }
+        set { logits = newValue ? .lastPosition : .none }
+    }
+}
+
+/// Presets for the common (tokens, logits) pairs. Engines currently sample a token under every
+/// preset; see `TokenRequest`.
+extension InferenceOptions {
+    /// Requests no token and no logits, for prefill and warmup chunks. Pass `maxTokens`; nil runs
+    /// until EOS.
+    public static func prefill(maxTokens: Int? = nil) -> InferenceOptions {
+        InferenceOptions(maxTokens: maxTokens, tokens: .none, logits: .none)
+    }
+    /// Sampled tokens, no logits. The default for decode.
+    public static func extend(maxTokens: Int? = nil) -> InferenceOptions {
+        InferenceOptions(maxTokens: maxTokens, tokens: .sample, logits: .none)
+    }
+    /// Same as `extend`.
+    public static func `default`(maxTokens: Int? = nil) -> InferenceOptions {
+        .extend(maxTokens: maxTokens)
+    }
+    /// Requests logits at every position and no token. For perplexity and scoring with
+    /// `forcedContinuation`.
+    public static func eval(maxTokens: Int? = nil, forcedContinuation: [Int32]? = nil) -> InferenceOptions {
+        InferenceOptions(
+            maxTokens: maxTokens, tokens: .none, logits: .allPositions, forcedContinuation: forcedContinuation)
+    }
+    /// Requests last-position logits and no token. For constrained decoding, where the caller masks
+    /// and samples.
+    public static func guided(maxTokens: Int? = nil) -> InferenceOptions {
+        InferenceOptions(maxTokens: maxTokens, tokens: .none, logits: .lastPosition)
+    }
+    /// Sampled tokens plus last-position logits. For inspecting logits during decode.
+    public static func sampleWithLogits(maxTokens: Int? = nil) -> InferenceOptions {
+        InferenceOptions(maxTokens: maxTokens, tokens: .sample, logits: .lastPosition)
+    }
+}
+
+// MARK: - Configuration Data Structures
+
+/// Configuration-specific errors with user-friendly messages
+public enum ConfigurationError: Error, LocalizedError {
+    case fileNotFound(String)
+    case invalidJSON(String, String)
+    case decodingError(String, String)
+    case validationError(String, String)
+    case noValidConfigurations
+
+    public var errorDescription: String? {
+        switch self {
+        case .fileNotFound(let path):
+            return "Configuration file not found: \(path)"
+        case .invalidJSON(let file, let reason):
+            return "Invalid JSON in \(file): \(reason)"
+        case .decodingError(let file, let reason):
+            return "Configuration format error in \(file): \(reason)"
+        case .validationError(let file, let reason):
+            return "Configuration validation failed in \(file): \(reason)"
+        case .noValidConfigurations:
+            return "No valid configuration files could be loaded"
+        }
+    }
+}
+
+// MARK: - Core Abstractions
+
+/// Interface for inference engines.
+///
+/// KV cache is preserved between `generate()` calls. Call `reset()` to clear.
+public protocol InferenceEngine: Sendable {
+    associatedtype OutputSequence: InferenceOutputSequence
+    typealias TokenId = Int32
+
+    // MARK: - Primary API
+
+    /// Stream token generation from the given input.
+    ///
+    /// - Parameters:
+    ///   - input: Token IDs (prompt, context, or continuation).
+    ///   - sampling: Sampling configuration (temperature, topK, etc.).
+    ///   - generation: Inference options (maxTokens, tokens, logits).
+    /// - Returns: An `InferenceOutputSequence` — iterate for tokens, read
+    ///   `stopReason` after the loop to learn why generation ended.
+    func generate(
+        with input: [TokenId],
+        samplingConfiguration: SamplingConfiguration,
+        inferenceOptions: InferenceOptions
+    ) async throws -> OutputSequence
+
+    // MARK: - Lifecycle
+
+    /// Number of tokens the engine has processed in the current session.
+    /// Resets to 0 on full reset. Used by callers to compute shared prefix length.
+    var processedTokenCount: Int { get }
+
+    /// Reset KV cache to the state after processing `tokenIndex` tokens.
+    /// - tokenIndex == 0: full reset (clear all state, equivalent to reset())
+    /// - tokenIndex > 0: partial reset (keep cache for first tokenIndex positions)
+    /// Precondition: tokenIndex >= 0 && tokenIndex <= processedTokenCount
+    func reset(to tokenIndex: Int) async throws
+
+    /// Run dummy inference to trigger kernel compilation.
+    func warmup(queryLength: Int, sampling: SamplingConfiguration?) async throws
+
+    // MARK: - Cancellation
+
+    /// Whether the engine has an active generation in progress.
+    var isBusy: Bool { get }
+
+    /// Cancel any in-flight generation. Invalidates the current GenerationToken.
+    /// For pull-based engines, takes effect on the next `next()` call.
+    /// For push-based engines (pipelined), also cancels the background Task.
+    func cancel() async throws
+
+    // MARK: - Capabilities
+
+    /// Whether this engine supports per-step logits extraction.
+    /// GPU-pipelined engines (which sample on-device) return false.
+    var supportsLogits: Bool { get }
+
+    /// How many tokens were reused from cache on the last `generate()` call.
+    ///
+    /// After each `generate()`, this reflects how many leading tokens of the input
+    /// matched the engine's cached history and were skipped (no recomputation needed).
+    /// Useful for debugging multi-turn efficiency and verifying prefix caching behavior.
+    var lastPrefixHitCount: Int { get }
+
+    /// Whether the engine carries recurrent state (SSM / hybrid models).
+    ///
+    /// Recurrent/conv states summarize the entire prefix and cannot be truncated
+    /// by moving a KV cursor, so token-prefix reuse is impossible: on any rewind
+    /// the engine full-resets and replays the whole prompt. Callers (e.g. the
+    /// server's prefix-reuse accounting) should short-circuit when this is true.
+    /// Defaults to `false`.
+    var hasRecurrentState: Bool { get }
+
+    // MARK: - Configuration
+
+    associatedtype ConfigType: Codable, InferenceConfiguration
+    var config: ConfigType { get }
+}
+
+public protocol InferenceConfiguration: Sendable {
+    var maxContextLength: Int { get }
+
+    /// Tokens per prefill chunk. Override in conforming types if needed.
+    var prefillChunkSize: Int { get }
+
+    /// Minimum prompt length (in tokens) to trigger chunked processing.
+    /// Prompts at or below this length are processed in a single pass.
+    var chunkThreshold: Int { get }
+}
+
+/// Memory-based default prefill chunk size.
+///
+/// Prefill throughput rises with chunk size and flattens past 4096, while peak
+/// wired memory keeps climbing (e.g. gpt-oss-120b: ~87 GB at chunk 4096 vs
+/// ~109 GB at 8192 for ~no gain). 4096 is the sweet spot, and only ≥64 GB
+/// machines can hold the large models that benefit from it; smaller Macs and
+/// all iOS devices fall to 2048.
+func defaultPrefillChunkSize() -> Int {
+    let bytes = ProcessInfo.processInfo.physicalMemory
+    let gb = bytes / (1024 * 1024 * 1024)
+    if gb < 64 { return 2048 }
+    return 4096
+}
+
+extension InferenceConfiguration {
+    public var prefillChunkSize: Int { defaultPrefillChunkSize() }
+
+    /// Default threshold: 2× chunk size.
+    public var chunkThreshold: Int { prefillChunkSize * 2 }
+}
+
+// MARK: - Default Implementations
+
+extension InferenceEngine {
+    /// Default: supportsLogits is false. Engines that can return per-step
+    /// logits (sequential, static-shape) override this to true.
+    public var supportsLogits: Bool { false }
+}
+
+extension InferenceEngine {
+    /// Guided/structured generation needs either per-step logits (CPU-side
+    /// constrained decoding) or GPU-side constrained sampling
+    /// (`ConstrainedGenerationCapable`).
+    public var supportsGuidedGeneration: Bool {
+        supportsLogits || self is any ConstrainedGenerationCapable
+    }
+}
+
+extension InferenceEngine {
+    /// Default: no prefix hits (engine doesn't track history).
+    public var lastPrefixHitCount: Int { 0 }
+}
+
+extension InferenceEngine {
+    public var hasRecurrentState: Bool { false }
+}
+
+extension InferenceEngine {
+    /// Default: engine is not busy.
+    public var isBusy: Bool { false }
+
+    /// Default: no-op cancel. Engines with active generation override this.
+    public func cancel() async throws {}
+}
+
+extension InferenceEngine {
+    /// Default no-op implementation of warmup.
+    public func warmup(queryLength: Int, sampling: SamplingConfiguration?) async throws {
+        // No-op by default
+    }
+}
+
+extension InferenceEngine {
+    /// Default: processedTokenCount is 0 (engine hasn't processed anything).
+    public var processedTokenCount: Int { 0 }
+}
+
+extension InferenceEngine {
+    /// Default: reset() delegates to reset(to: 0) for full reset.
+    public func reset() async throws {
+        try await reset(to: 0)
+    }
+}
+
+extension InferenceEngine {
+    /// Default implementation: accepts all sampling configurations.
+    ///
+    /// Engines that use CPU fallback samplers can accept all configurations
+    /// since CompositeSampler handles greedy, temperature, topK, and topP.
+    ///
+    /// Override this in engines with GPU samplers that have limited support.
+    public func validateSamplingStrategy(_ config: SamplingConfiguration) throws {
+        // Default: accept all configurations (CPU fallback handles them)
+    }
+}
+
+// MARK: - Errors
+
+public enum InferenceRuntimeError: Error, LocalizedError {
+    case functionNotFound(String)
+    case modelNotFound(String)
+    case modelLoadingFailed(underlying: Error)
+    case invalidState(String)
+    case invalidArgument(String)
+    case logitsExtractionFailed
+    case invalidInputType(String)
+    case invalidOutputType(String)
+    case unsupportedLogitsType(String)
+    case unsupportedTokenType(String)
+    case contextLengthExceeded(Int, Int)  // (current_position, max_context_length)
+    case unsupportedEngine(String)
+    case unsupportedEngineVariant(String)
+    case bufferAllocationFailed(String)
+    /// The scheduler's wait queue is full. `depth` is the queue limit.
+    case queueFull(depth: Int)
+    case genericError(String)
+
+    /// True for `.queueFull`.
+    package var isQueueFull: Bool {
+        switch self {
+        case .queueFull: true
+        default: false
+        }
+    }
+
+    public var errorDescription: String? {
+        switch self {
+        case .functionNotFound(let name):
+            return "Function '\(name)' not found in compiled program"
+        case .modelNotFound(let path):
+            return "Model not found at path: \(path)"
+        case .modelLoadingFailed(let underlying):
+            return "Model loading failed: \(underlying.localizedDescription)"
+        case .invalidState(let description):
+            return "Invalid engine state: \(description)"
+        case .invalidArgument(let description):
+            return "Invalid argument: \(description)"
+        case .logitsExtractionFailed:
+            return "Failed to extract logits from model output"
+        case .invalidInputType(let name):
+            return "Invalid input type for '\(name)'"
+        case .invalidOutputType(let name):
+            return "Invalid output type for '\(name)'"
+        case .unsupportedLogitsType(let type):
+            return "Unsupported logits type: \(type)"
+        case .unsupportedTokenType(let type):
+            return "Unsupported token type: \(type)"
+        case .contextLengthExceeded(let currentPosition, let maxContextLength):
+            return
+                "Context length exceeded: position \(currentPosition) >= max context length \(maxContextLength). Reduce prompt length or increase max context length."
+        case .unsupportedEngine(let type):
+            return "Unsupported engine type: \(type)"
+        case .unsupportedEngineVariant(let variant):
+            return "Unknown variant \(variant)"
+        case .bufferAllocationFailed(let details):
+            return "GPU buffer allocation failed: \(details)"
+        case .queueFull(let depth):
+            return "Request queue full (depth: \(depth))"
+        case .genericError(let message):
+            return message
+        }
+    }
+}
+
+// MARK: - Engine Options
+
+// MARK: - Multimodal
+
+// TODO: Multimodal support in `CoreAIPipelinedEngine`.
+
+/// Engine that supports vision/audio input in addition to text tokens.
+///
+/// The typical flow:
+/// 1. `encodeImage(at:)` — preprocess + run vision encoder, return embeddings
+/// 2. `generate(with: InputEmbeddings, ...)` — scatter-merge embeddings into
+///    token sequence and run prefill + decode
+///
+/// The caller owns the embeddings and decides caching strategy.
+public protocol MultimodalInferenceEngine: InferenceEngine {
+    /// Whether this engine instance accepts image and video input. An engine built from a text
+    /// bundle reports false.
+    var acceptsMultimodalInput: Bool { get }
+
+    /// Encode an image into embeddings suitable for injection into the VLM.
+    /// Returns the embedded representation — caller decides whether to cache.
+    func encodeImage(at url: URL) async throws -> InputEmbeddings
+
+    /// Encode a CGImage into embeddings.
+    func encodeImage(cgImage: CGImage) async throws -> InputEmbeddings
+
+    /// Encode video frames into concatenated embeddings for injection into the VLM.
+    ///
+    /// Default implementation encodes each frame independently through `encodeImage(cgImage:)`
+    /// and concatenates embeddings along the sequence dimension.
+    func encodeVideo(_ video: VideoInput) async throws -> InputEmbeddings
+
+    /// Generate tokens from a token sequence with embedded image regions.
+    ///
+    /// The engine scatter-merges `input` over the image placeholder tokens during prefill, then
+    /// continues standard autoregressive decode. `input` holds the embeddings of every image
+    /// placeholder in `tokens`, in order.
+    func generate(
+        with input: InputEmbeddings,
+        tokens: [TokenId],
+        samplingConfiguration: SamplingConfiguration,
+        inferenceOptions: InferenceOptions
+    ) async throws -> OutputSequence
+}
+
+// MARK: - Engine Options
+
+/// KV cache memory management strategy.
+///
+/// Determines how the KV cache is allocated and managed at runtime.
+/// This is engine-level configuration applicable to any engine that uses KV caching.
+public enum KVCacheStrategy: String, Codable, Sendable, CaseIterable {
+    /// Auto-select the best strategy based on model capability.
+    /// - For models exported with `--dynamic-sized-kvcache-gpu`: uses `growing`
+    /// - For legacy models with fixed seqDim: uses `fixedSize`
+    /// This is the recommended default for best memory efficiency with backward compatibility.
+    case auto = "auto"
+
+    /// Fixed-size allocation at startup.
+    /// Allocates the specified size upfront (defaults to `maxContextLength`).
+    /// - Pros: No runtime overhead, predictable memory usage
+    /// - Cons: May waste memory for short conversations
+    case fixedSize = "fixed_size"
+
+    /// Start small, grow exponentially (2×) as needed up to maxContextLength.
+    /// Copies existing KV data to new buffer on growth.
+    /// - Pros: Memory efficient for short conversations
+    /// - Cons: ~20ms stall on growth (amortized O(log₂ N))
+    case growing = "growing"
+
+    /// Fixed size with sliding window (not yet implemented).
+    /// Drops oldest tokens when capacity is reached.
+    /// - Pros: Bounded memory for infinite contexts
+    /// - Cons: Loses early context
+    case chunked = "chunked"
+
+    /// Returns the default cache size for this strategy.
+    ///
+    /// - Parameter maxContextLength: Maximum context length from model config
+    /// - Returns: Default size in tokens, or `nil` for `.auto` (resolved at factory level)
+    ///   - `.auto`: `nil` (size depends on resolved strategy, determined by model shape)
+    ///   - `.fixedSize`: `maxContextLength` (make use of full model capacity)
+    ///   - `.growing`: 256 (small initial allocation)
+    ///   - `.chunked`: `maxContextLength` (disable chunking)
+    public func defaultSize(maxContextLength: Int) -> Int? {
+        switch self {
+        case .auto: return nil  // Resolved at factory level based on model capability
+        case .fixedSize: return maxContextLength
+        case .growing: return 256
+        case .chunked: return maxContextLength
+        }
+    }
+}

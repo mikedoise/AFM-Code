@@ -1,0 +1,780 @@
+// Copyright 2026 Apple Inc.
+//
+// Use of this source code is governed by a BSD-3-clause license that can
+// be found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
+import CoreAIShared
+import Foundation
+import FoundationModels
+import Synchronization
+import Tokenizers
+
+/// FoundationModels Adoption for Core AI inference engines.
+///
+/// Wraps any `InferenceEngine` (pipelined, sequential, or static-shape) and exposes it
+/// through the FoundationModels `LanguageModel` protocol. It uses the modern `tokenSequence()`
+/// API for efficient streaming token generation.
+/// ## Engine Selection
+/// The engine type is determined by `EngineFactory` based on model structure:
+/// - **Pipelined**: GPU-accelerated with pipeline-depth-matched buffering (fastest for GPU models)
+/// - **Sequential**: CPU-based synchronous execution (fallback)
+/// - **Static-shape**: Neural Engine optimized for chunked static models
+///
+/// ## Usage
+/// ```swift
+/// let model = try await CoreAILanguageModel(resourcesAt: url)  // .lazy by default
+/// print(model.estimatedSizeOnDiskBytes ?? 0)
+/// try await model.load()                                       // optional; respond auto-loads
+/// let session = LanguageModelSession(model: model)
+/// // ... generate ...
+/// model.unload()
+/// ```
+public struct CoreAILanguageModel: LanguageModel {
+    public enum LoadMode: Sendable {
+        case lazy
+        case eager
+    }
+
+    // MARK: - Properties
+
+    private let url: URL
+    private let variant: String?
+    private let kvCacheStrategy: KVCacheStrategy
+    private let prefillChunkSizeConfig: Int?
+    private let prefillChunkThresholdConfig: Int?
+    fileprivate let samplingConfig: SamplingConfiguration
+    fileprivate let bundle: LanguageModelBundle
+    fileprivate let tokenizer: any Tokenizer
+    fileprivate let thinkingFormat: ThinkTagParser.Format
+    fileprivate let toolCallDetection: ToolCallDetection?
+    private let supportsToolCalling: Bool
+    fileprivate let supportsReasoning: Bool
+    fileprivate let resources: ModelResources
+    /// All EOS-like token IDs beyond the tokenizer's main `eosTokenId` — e.g.
+    /// Gemma's `<end_of_turn>`, read from tokenizer_config.json at init, plus a
+    /// base-vocab `<|im_end|>` and this model's agentic `<|eot|>` when present.
+    fileprivate let additionalEosTokenIds: Set<Int32>
+    /// Most whitespace characters allowed between two JSON tokens in schema-guided generation from
+    /// this model; nil when unlimited.
+    fileprivate let maxWhitespaceCount: Int?
+
+    // MARK: - Protocol Requirements
+
+    public typealias Executor = CoreAIExecutor
+
+    public var capabilities: LanguageModelCapabilities {
+        var caps: [LanguageModelCapabilities.Capability] = []
+        if supportsToolCalling { caps.append(.toolCalling) }
+        if supportsReasoning { caps.append(.reasoning) }
+        if isGuidedGenerationSupported { caps.append(.guidedGeneration) }
+        return LanguageModelCapabilities(caps)
+    }
+
+    public var executorConfiguration: CoreAIExecutor.Configuration {
+        CoreAIExecutor.Configuration(
+            url: url,
+            variant: variant,
+            kvCacheStrategy: kvCacheStrategy,
+            modelIdentifier: bundle.name,
+            samplingConfig: samplingConfig,
+            vocabSize: bundle.vocabSize,
+            prefillChunkSize: prefillChunkSizeConfig,
+            prefillChunkThreshold: prefillChunkThresholdConfig
+        )
+    }
+
+    // MARK: - Initialization
+
+    /// Creates a model from a resource bundle on disk.
+    ///
+    /// ```swift
+    /// let model = try await CoreAILanguageModel(resourcesAt: url)             // lazy
+    /// let model = try await CoreAILanguageModel(resourcesAt: url, mode: .eager)
+    /// ```
+    ///
+    /// - Parameter url: URL to the model bundle directory.
+    /// - Parameter mode: When to load the engine. Defaults to `.lazy`. With
+    ///   `.eager`, the tokenizer and engine load concurrently
+    /// - Parameter variant: Engine variant override (e.g. "coreai-sequential",
+    ///   "ane"). Nil for auto-detect from model structure.
+    /// - Parameter kvCacheStrategy: KV cache memory strategy. Defaults to
+    ///   `.auto` (256-token initial size for dynamic models). Pass
+    ///   `.fixedSize` to pre-allocate at full `maxContextLength`.
+    /// - Parameter prefillChunkSize: Tokens per prefill chunk, or `nil`
+    ///   to use the model metadata or engine default.
+    /// - Parameter prefillChunkThreshold: Minimum prompt tokens to trigger
+    ///   chunking, or `nil` to use the model metadata or engine default.
+    /// - Parameter maxWhitespaceCount: Most whitespace characters the grammar allows between
+    ///   two JSON tokens during schema-guided generation. Defaults to
+    ///   ``ConstrainedGenerationSession/defaultMaxWhitespaceCount``; `nil` for no limit. The limit
+    ///   ends a model that keeps choosing whitespace after the last value, and does not change
+    ///   output that stays within it.
+    /// - Throws: If the asset bundle is invalid or the tokenizer fails to load.
+    ///   With `.eager`, also throws on engine-creation failure.
+    public init(
+        resourcesAt url: URL,
+        mode: LoadMode = .lazy,
+        variant: String? = nil,
+        kvCacheStrategy: KVCacheStrategy = .auto,
+        prefillChunkSize: Int? = nil,
+        prefillChunkThreshold: Int? = nil,
+        maxWhitespaceCount: Int? = ConstrainedGenerationSession.defaultMaxWhitespaceCount
+    ) async throws {
+        let bundle = try LanguageModelBundle(at: url)
+        let configuration = CoreAIExecutor.Configuration(
+            url: url,
+            variant: variant,
+            kvCacheStrategy: kvCacheStrategy,
+            modelIdentifier: bundle.name,
+            samplingConfig: .greedy,
+            vocabSize: bundle.vocabSize,
+            prefillChunkSize: prefillChunkSize,
+            prefillChunkThreshold: prefillChunkThreshold
+        )
+        let resources = ModelResources.shared(for: configuration)
+
+        async let engineLoad: Void = {
+            if mode == .eager { try await resources.loadResources() }
+        }()
+
+        let tokenizerLoadSpan = InstrumentsProfiler.beginTokenizerLoad(id: bundle.tokenizer)
+        let tokenizer = try await bundle.loadTokenizer()
+        tokenizerLoadSpan.end()
+
+        try await engineLoad
+        self.init(
+            configuration: configuration, bundle: bundle, tokenizer: tokenizer,
+            resources: resources, maxWhitespaceCount: maxWhitespaceCount)
+    }
+
+    private init(
+        configuration: CoreAIExecutor.Configuration,
+        bundle: LanguageModelBundle,
+        tokenizer: any Tokenizer,
+        resources: ModelResources,
+        maxWhitespaceCount: Int?
+    ) {
+        let toolCallDetection = detectToolCallFormat(using: tokenizer)
+        let thinkingFormat = detectThinkingFormat(using: tokenizer)
+        self.url = configuration.url
+        self.variant = configuration.variant
+        self.kvCacheStrategy = configuration.kvCacheStrategy
+        self.prefillChunkSizeConfig = configuration.prefillChunkSize
+        self.prefillChunkThresholdConfig = configuration.prefillChunkThreshold
+        self.samplingConfig = configuration.samplingConfig
+        self.bundle = bundle
+        self.tokenizer = tokenizer
+        self.thinkingFormat = thinkingFormat
+        self.toolCallDetection = toolCallDetection
+        self.supportsToolCalling = toolCallDetection != nil
+        self.supportsReasoning = {
+            // Gemma 4's native channel dialect is not implemented here. Never
+            // interpret literal <think> text inside its raw tool arguments.
+            guard toolCallDetection?.format != .gemma else { return false }
+            switch thinkingFormat {
+            case .agentic: return true
+            case .tagPair(let open, _): return tokenizer.vocabContains(open)
+            }
+        }()
+        self.resources = resources
+        // Config-derived turn-end IDs. The base-vocab <|im_end|> baseline is
+        // folded in at runtime by runtimeStopTokens.
+        var additional: Set<Int32> =
+            bundle.tokenizerPath.map {
+                LanguageConfig.additionalStopTokenIds(from: $0, tokenizer: tokenizer)
+            } ?? []
+        // Agentic models stop on <|eot|> so the runner doesn't loop self->user
+        // turns. This is text-adapter-specific, so it is folded in here rather
+        // than in the shared resolver.
+        if let id = agenticEndOfTurnTokenId(thinkingFormat: thinkingFormat, tokenizer: tokenizer) {
+            additional.insert(id)
+        }
+        self.additionalEosTokenIds = additional
+        self.maxWhitespaceCount = maxWhitespaceCount
+    }
+
+    /// Exact chat-template token count for AFM Code's context gauge and admission.
+    public func inputTokenCount(for entries: [Transcript.Entry], tools: [Transcript.ToolDefinition] = []) -> Int {
+        CoreAIExecutor.makeTokens(from: entries, using: tokenizer, tools: tools, toolCallDetection: toolCallDetection).count
+    }
+
+    // MARK: - Resource control
+
+    /// Estimated on-disk size of the model's main asset, in bytes.
+
+    public var estimatedSizeOnDiskBytes: Int? {
+        guard let assetURL = bundle.modelBundle.modelURL(for: ModelBundle.ComponentKey.main) else { return nil }
+        return assetURL.recursiveFileSizeInBytes()
+    }
+
+    public func load() async throws {
+        try await resources.loadResources()
+    }
+
+    public func unload() {
+        resources.unloadResources()
+    }
+
+    /// Whether guided generation is available for this model. Assumes yes
+    /// before an engine is loaded.
+    private var isGuidedGenerationSupported: Bool {
+        resources.loadedEngineSupportsGuidedGeneration ?? true
+    }
+
+    // MARK: - Executor
+
+    public struct CoreAIExecutor: LanguageModelExecutor {
+        public typealias Model = CoreAILanguageModel
+
+        public struct Configuration: Hashable, Sendable {
+            let url: URL
+            let variant: String?
+            let kvCacheStrategy: KVCacheStrategy
+            let modelIdentifier: String
+            let samplingConfig: SamplingConfiguration
+            let vocabSize: Int?
+            let prefillChunkSize: Int?
+            let prefillChunkThreshold: Int?
+        }
+
+        // MARK: - Properties
+
+        private let resources: ModelResources
+
+        // MARK: - Initialization
+
+        public init(configuration: Configuration) throws {
+            self.resources = ModelResources.shared(for: configuration)
+        }
+
+        // MARK: - Prewarm (FoundationModels, synchronous)
+
+        /// Kicks off the engine load in the background.
+        public func prewarm(model: CoreAILanguageModel, transcript: Transcript) {
+            Task { try? await resources.loadResources() }
+        }
+
+        // MARK: - respond(to:model:streamingInto:) — new channel-based API
+
+        public nonisolated(nonsending) func respond(
+            to request: LanguageModelExecutorGenerationRequest,
+            model: CoreAILanguageModel,
+            streamingInto channel: LanguageModelExecutorGenerationChannel
+        ) async throws {
+            // Tokenization span
+            let tokenizationSpan = InstrumentsProfiler.beginTokenization(inputLength: 0)
+            // Map FM's reasoning level to a canonical effort string and pass it to makeTokens.
+            var reasoningEffort: String? = nil
+            if #available(FoundationModels 2.0, *) {
+                reasoningEffort = Self.reasoningEffortString(from: request.contextOptions.reasoningLevel)
+            }
+            let promptTokens = Self.makeTokens(
+                from: Array(request.transcript),
+                using: model.tokenizer,
+                tools: request.enabledToolDefinitions,
+                toolCallDetection: model.toolCallDetection,
+                reasoningEffort: reasoningEffort,
+                component: "CoreAIExecutor"
+            )
+            guard !promptTokens.isEmpty else {
+                tokenizationSpan.end()
+                throw LanguageModelError.unsupportedTranscriptContent(
+                    .init(
+                        unsupportedContent: Array(request.transcript),
+                        debugDescription: "CoreAI could not tokenize the conversation transcript."
+                    )
+                )
+            }
+            tokenizationSpan.end()
+
+            CLILogger.log("Tokenized \(promptTokens.count) tokens", component: "CoreAIExecutor")
+
+            let effectiveSamplingConfig = makeSamplingConfig(
+                from: request.generationOptions, base: model.samplingConfig)
+            let defaultMaxTokens = model.supportsReasoning ? 2048 : 512
+            let maxTokens = request.generationOptions.maximumResponseTokens ?? defaultMaxTokens
+            guard promptTokens.count + maxTokens <= model.bundle.maxContextLength else {
+                throw LanguageModelError.contextSizeExceeded(.init(contextSize: model.bundle.maxContextLength, tokenCount: promptTokens.count + maxTokens, debugDescription:
+                    "Core AI input (\(promptTokens.count)) plus output budget (\(maxTokens)) exceeds \(model.bundle.maxContextLength) tokens."))
+            }
+
+            // Borrow the engine for the whole generation.
+            try await resources.withEngine { engine in
+                // FoundationModels now threads entry identity itself based on event
+                // ordering — we no longer mint an entryID and pass it down.
+
+                // Check if guided generation is requested
+                if let schema = request.schema {
+                    guard engine.supportsGuidedGeneration else {
+                        throw LanguageModelError.unsupportedCapability(
+                            .init(
+                                capability: .guidedGeneration,
+                                debugDescription:
+                                    "This model's inference engine does not support guided generation "
+                                    + "(constrained decoding requires per-step logits)."
+                            )
+                        )
+                    }
+                    try await respondConstrained(
+                        engine: engine,
+                        model: model,
+                        schema: schema,
+                        promptTokens: promptTokens,
+                        samplingConfig: effectiveSamplingConfig,
+                        maxTokens: maxTokens,
+                        channel: channel
+                    )
+                } else {
+                    try await respondVanilla(
+                        engine: engine,
+                        model: model,
+                        promptTokens: promptTokens,
+                        samplingConfig: effectiveSamplingConfig,
+                        maxTokens: maxTokens,
+                        channel: channel
+                    )
+                }
+            }
+        }
+
+        // MARK: - Vanilla Generation (no schema)
+
+        private func respondVanilla(
+            engine: any InferenceEngine,
+            model: CoreAILanguageModel,
+            promptTokens: [Int],
+            samplingConfig: SamplingConfiguration,
+            maxTokens: Int,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async throws {
+            let tokenizer = model.tokenizer
+            let tokenStream = try await engine.generate(
+                with: promptTokens.map(Int32.init),
+                samplingConfiguration: samplingConfig,
+                inferenceOptions: InferenceOptions(maxTokens: maxTokens)
+            )
+
+            let eosTokens = tokenizer.runtimeStopTokens(additional: model.additionalEosTokenIds)
+            // Incremental-decode buffer. After a clean emit, one token is
+            // retained as context for the next step (see below). During a
+            // multi-byte sequence that hasn't decoded cleanly yet, multiple
+            // tokens accumulate until the sequence is complete. In the steady
+            // state the buffer holds at most 2 tokens, so tokenizer.decode
+            // is O(1) per step.
+            var pendingTokens: [Int32] = []
+            var previousDecodedText: String = ""
+            var tokenStep: Int = 0
+            // Gemma tool arguments are raw strings. Route the whole stream
+            // through the tool parser without a preceding reasoning parser.
+            var outputParser = LanguageModelOutputParser(
+                thinkingFormat: model.thinkingFormat,
+                supportsReasoning: model.supportsReasoning,
+                toolCallDetection: model.toolCallDetection)
+            var generatedTokenCount: Int = 0
+            var reasoningTokenCount: Int = 0
+
+            for try await output in tokenStream {
+                let token = output.tokenId
+                if outputParser.shouldStop(token: token, stopTokens: eosTokens) {
+                    tokenStream.setStopReason(.eos)
+                    break
+                }
+
+                pendingTokens.append(token)
+                tokenStep += 1
+                generatedTokenCount += 1
+
+                let decodeSpan = InstrumentsProfiler.beginDecode(step: tokenStep)
+                let decodedText = tokenizer.decode(tokens: pendingTokens.map { Int($0) })
+                decodeSpan.end()
+
+                let common = decodedText.commonPrefix(with: previousDecodedText)
+                let delta = String(decodedText.dropFirst(common.count))
+                // Check for replacement char on the full `decodedText`, not on
+                // `delta`. Some tokenizers emit one U+FFFD per attempted decode
+                // of an incomplete multi-byte sequence (rather than one per
+                // bad byte), so two consecutive partial tokens can produce
+                // identical "\u{FFFD}" strings — making `delta` empty and
+                // hiding the still-incomplete state. Checking `decodedText`
+                // catches that case.
+                let hasReplacementChar = decodedText.unicodeScalars.contains { $0 == "\u{FFFD}" }
+
+                if hasReplacementChar {
+                    // UTF-8 bytes don't form a clean character yet. Hold the
+                    // token and wait for the next iteration to extend the
+                    // buffer; don't drop or advance.
+                    await channel.send(
+                        .response(action: .appendText("", tokenCount: 1))
+                    )
+                    previousDecodedText = decodedText
+                    continue
+                }
+
+                for event in outputParser.consume(delta) {
+                    if case .reasoning = event { reasoningTokenCount += 1 }
+                    await dispatch(event: event, channel: channel)
+                }
+
+                // Retain the last token as O(1) context for the next decode.
+                // SentencePiece needs at least one prior token to infer the leading
+                // ▁ (space) on the following token; clearing to empty decodes each
+                // new token in isolation and drops inter-word spaces.
+                // Keeping one token bounds re-decode cost to 2 tokens per step.
+                // Safe for all supported tokenizers: decode([last]) is a prefix of
+                // decode([last, next]) when addPrefixSpace=true (Mistral, Llama, Qwen)
+                // and for ByteLevel tokenizers (GPT-2 style) where spaces are direct bytes.
+                if let last = pendingTokens.last {
+                    pendingTokens = [last]
+                    previousDecodedText = tokenizer.decode(tokens: [Int(last)])
+                } else {
+                    pendingTokens.removeAll(keepingCapacity: true)
+                    previousDecodedText = ""
+                }
+            }
+
+            // Flush parsers — drains any content held back waiting for a marker.
+            // Without this, content right at the EOS boundary (or inside an
+            // unclosed block) would be lost.
+            for event in outputParser.flush() {
+                await dispatch(event: event, channel: channel)
+            }
+
+            await channel.send(
+                .response(
+                    action: .updateUsage(
+                        input: .init(totalTokenCount: promptTokens.count, cachedTokenCount: 0),
+                        output: .init(
+                            totalTokenCount: generatedTokenCount,
+                            reasoningTokenCount: reasoningTokenCount
+                        )
+                    )))
+
+            // Yield to let the engine's tokenSequence Task finish cleanup
+            // (putBackEngine, state reset, etc.) before the next respond().
+            await Task.yield()
+        }
+
+        // MARK: - Event Dispatch
+
+        /// Preserve parser event ordering when bridging to Foundation Models.
+        private func dispatch(
+            event: LanguageModelOutputParser.Event,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            switch event {
+            case .reasoning(let text):
+                await channel.send(.reasoning(action: .appendText(text, tokenCount: 1)))
+            case .tool(let event):
+                await dispatchToolCall(for: event, channel: channel)
+            }
+        }
+
+        private func dispatchToolCall(
+            for event: ToolCallParser.Event,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            switch event {
+            case .text(let text):
+                if !text.isEmpty {
+                    await channel.send(
+                        .response(action: .appendText(text, tokenCount: 1))
+                    )
+                }
+            case .toolCall(let id, let name, let argsJSON):
+                CLILogger.log(
+                    "ToolCallParser: dispatching tool call id=\(id) name=\(name)",
+                    component: "CoreAIExecutor")
+                await channel.send(
+                    .toolCalls(
+                        action: .toolCall(
+                            id: id,
+                            name: name,
+                            action: .appendArguments(argsJSON, tokenCount: 1)
+                        )
+                    )
+                )
+            }
+        }
+
+        // MARK: - Constrained Generation (with schema)
+
+        private func respondConstrained(
+            engine: any InferenceEngine,
+            model: CoreAILanguageModel,
+            schema: GenerationSchema,
+            promptTokens: [Int],
+            samplingConfig: SamplingConfiguration,
+            maxTokens: Int,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async throws {
+            let schemaData = try JSONEncoder().encode(schema)
+
+            guard let jsonSchema = String(data: schemaData, encoding: .utf8) else {
+                preconditionFailure("GenerationSchema JSON encoding produced invalid UTF-8")
+            }
+
+            let strategy: any DecodingStrategy
+            if engine is any ConstrainedGenerationCapable {
+                strategy = PipelinedConstrainedDecodingStrategy(
+                    jsonSchema: jsonSchema, vocabSize: model.bundle.vocabSize,
+                    maxWhitespaceCount: model.maxWhitespaceCount)
+            } else {
+                strategy = ConstrainedDecodingStrategy(
+                    jsonSchema: jsonSchema, vocabSize: model.bundle.vocabSize,
+                    maxWhitespaceCount: model.maxWhitespaceCount)
+            }
+            let stopSequences = StopSequences(
+                for: model.tokenizer,
+                additionalEosTokenIds: model.additionalEosTokenIds
+            )
+
+            let stream = try await strategy.decode(
+                from: .tokens(promptTokens),
+                tokenizer: model.tokenizer,
+                inferenceEngine: engine,
+                samplingConfiguration: samplingConfig,
+                options: InferenceOptions(maxTokens: maxTokens),
+                stopSequences: stopSequences
+            )
+
+            // Bridge AsyncThrowingStream -> LanguageModelExecutorGenerationChannel
+            var generatedTokenCount = 0
+            for try await result in stream {
+                generatedTokenCount += 1
+                await channel.send(
+                    .response(action: .appendText(result.text, tokenCount: 1))
+                )
+            }
+
+            await channel.send(
+                .response(
+                    action: .updateUsage(
+                        input: .init(totalTokenCount: promptTokens.count, cachedTokenCount: 0),
+                        output: .init(
+                            totalTokenCount: generatedTokenCount,
+                            reasoningTokenCount: 0
+                        )
+                    )))
+
+            // Yield to let the engine's tokenSequence Task finish cleanup
+            // (putBackEngine, state reset, etc.) before the next respond().
+            await Task.yield()
+        }
+
+        // MARK: - Transcript → Tokens
+
+        /// Extracts plain text from a segment collection, joining with `separator`.
+        private static func textContent(
+            of segments: some Collection<Transcript.Segment>,
+            separator: String = ""
+        ) -> String {
+            segments.compactMap {
+                if case .text(let t) = $0 { return t.content }
+                return nil
+            }.joined(separator: separator)
+        }
+
+        /// Tool call entry for the assistant message's `tool_calls` array.
+        private struct ToolCallEntry: Sendable {
+            let id: String
+            let name: String
+            let arguments: String
+
+            /// The call as a template's `tool_calls` entry. Decoding sorts the arguments' keys, which
+            /// also makes them render the same way every time: `GeneratedContent` keeps no order of
+            /// its own (its `jsonString` varies from one instance to the next).
+            var message: any Sendable {
+                TemplateValues.toolCall(id: id, name: name, arguments: arguments)
+            }
+        }
+
+        /// Converts transcript entries to tokens using the provided tokenizer.
+        ///
+        /// Handles all entry types including prior tool calls and tool outputs.
+        /// Tool definitions are forwarded to `applyChatTemplate` so the model
+        /// sees the available functions in the system prompt.
+        static func makeTokens(
+            from entries: [Transcript.Entry],
+            using tokenizer: any Tokenizer,
+            tools: [Transcript.ToolDefinition] = [],
+            toolCallDetection: ToolCallDetection? = nil,
+            reasoningEffort: String? = nil,
+            component: String = "CoreAIExecutor"
+        ) -> [Int] {
+            var messages: [Message] = []
+
+            for entry in entries {
+                switch entry {
+                case .instructions(let instructions):
+                    let text = textContent(of: instructions.segments, separator: "\n")
+                    if !text.isEmpty { messages.append(["role": "system", "content": text]) }
+
+                case .prompt(let prompt):
+                    let text = textContent(of: prompt.segments)
+                    if !text.isEmpty { messages.append(["role": "user", "content": text]) }
+
+                case .response(let response):
+                    let text = textContent(of: response.segments)
+                    if !text.isEmpty { messages.append(["role": "assistant", "content": text]) }
+
+                case .toolCalls(let toolCalls):
+                    let calls = toolCalls.map {
+                        ToolCallEntry(id: $0.id, name: $0.toolName, arguments: $0.arguments.jsonString)
+                    }
+                    messages.append([
+                        "role": "assistant",
+                        "content": "" as any Sendable,
+                        "tool_calls": calls.map(\.message) as any Sendable,
+                    ])
+
+                case .toolOutput(let output):
+                    // Tool result turn.
+                    let content = textContent(of: output.segments)
+                    messages.append([
+                        "role": "tool",
+                        "tool_call_id": output.id,
+                        "name": output.toolName,
+                        "content": content,
+                    ])
+
+                case .reasoning:
+                    // Don't echo the model's prior reasoning back into the prompt.
+                    continue
+
+                @unknown default:
+                    continue
+                }
+            }
+
+            if messages.isEmpty { return [] }
+
+            let toolSpecs: [ToolSpec]? = tools.isEmpty ? nil : tools.compactMap { makeToolSpec(from: $0) }
+
+            // Phi-family templates read tools from a system message's `tools` key, not the
+            // top-level `tools` variable. Attach the specs there (synthesizing a system message
+            // if none exists) only for that dialect, mirroring the server's ChatHandler. Top-level
+            // `tools` is still passed for families such as Qwen3.
+            messages = injectToolsIntoSystemMessageIfNeeded(
+                messages, toolSpecs: toolSpecs, detection: toolCallDetection)
+
+            do {
+                CLILogger.log("Applying chat template via tokenizer", component: component)
+                // Reasoning effort is applied as template context. The server also emits the
+                // legacy `/no_think` literal for models that read it from the system prompt;
+                // this path relies on `enable_thinking`.
+                let extra = reasoningTemplateContext(reasoningEffort)
+                return try tokenizer.applyChatTemplate(
+                    messages: messages, tools: toolSpecs,
+                    additionalContext: extra.isEmpty ? nil : extra)
+            } catch {
+                // Shown without --verbose, once per kind of failure: the simple encoding below is not
+                // what the model was trained on.
+                CLILogger.warnOnce(
+                    "chat template: \(error)",
+                    "Warning: failed to apply chat template: \(error), falling back to simple encoding",
+                    component: component)
+                let text = messages.compactMap { $0["content"] as? String }.joined(separator: "\n")
+                return tokenizer.encode(text: text)
+            }
+        }
+
+        /// Maps FM's `ContextOptions.ReasoningLevel` to our canonical effort string
+        /// (light→low, moderate→medium, deep→high, custom→verbatim).
+        @available(FoundationModels 2.0, *)
+        static func reasoningEffortString(from level: ContextOptions.ReasoningLevel?) -> String? {
+            switch level {
+            case .none: return nil
+            case .some(.light): return "low"
+            case .some(.moderate): return "medium"
+            case .some(.deep): return "high"
+            case .some(.custom(let s)): return s
+            @unknown default: return nil
+            }
+        }
+
+        /// Maps a canonical effort string to chat-template keyword arguments. Mirrors
+        /// `CoreAILMCommon.ReasoningEffort.templateContext`; unifying would require that type in a
+        /// module below both CoreAILanguageModels and CoreAILMCommon (for example CoreAIShared).
+        static func reasoningTemplateContext(_ effort: String?) -> [String: any Sendable] {
+            guard let e = effort?.trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty else {
+                return [:]
+            }
+            if e.lowercased() == "none" { return ["enable_thinking": false] }
+            return ["reasoning_effort": e, "enable_thinking": true]
+        }
+
+        /// Converts a `ToolDefinition` into the `ToolSpec` format expected by
+        /// `applyChatTemplate`. Parameters are decoded into a typed `JSONValue`
+        /// tree — avoids passing raw `Any` through the codebase.
+        private static func makeToolSpec(from definition: Transcript.ToolDefinition) -> ToolSpec? {
+            guard
+                let schemaData = try? JSONEncoder().encode(definition.parameters),
+                let rawObj = try? JSONSerialization.jsonObject(with: schemaData),
+                let dict = rawObj as? [String: Any]
+            else {
+                CLILogger.log(
+                    "Failed to encode parameters for tool '\(definition.name)'",
+                    component: "CoreAIExecutor")
+                return nil
+            }
+            let function: [String: any Sendable] = [
+                "name": definition.name,
+                "description": definition.description,
+                "parameters": dict.mapValues { JSONValue($0).sendable },
+            ]
+            return ["type": "function", "function": function]
+        }
+
+        /// Typed, `Sendable` representation of an arbitrary JSON value.
+        ///
+        /// Bridges the `NSObject`-bridged output of `JSONSerialization` into an
+        /// explicit Swift enum so nothing untyped escapes into the rest of the code.
+        private indirect enum JSONValue: Sendable {
+            case string(String)
+            case int(Int)
+            case double(Double)
+            case bool(Bool)
+            case array([JSONValue])
+            case object([String: JSONValue])
+            case null
+
+            init(_ value: Any) {
+                switch value {
+                case let s as String: self = .string(s)
+                case let n as NSNumber where CFGetTypeID(n) == CFBooleanGetTypeID():
+                    self = .bool(n.boolValue)
+                case let n as NSNumber:
+                    let d = n.doubleValue
+                    self = (d == d.rounded() && !d.isInfinite) ? .int(n.intValue) : .double(d)
+                case let a as [Any]: self = .array(a.map { JSONValue($0) })
+                case let o as [String: Any]: self = .object(o.mapValues { JSONValue($0) })
+                default: self = .null
+                }
+            }
+
+            var sendable: any Sendable {
+                switch self {
+                case .string(let v): return v
+                case .int(let v): return v
+                case .double(let v): return v
+                case .bool(let v): return v
+                case .null: return NSNull()
+                case .array(let v): return v.map(\.sendable)
+                case .object(let v): return v.mapValues(\.sendable)
+                }
+            }
+        }
+
+        // MARK: - Helper Methods
+
+        private func makeSamplingConfig(
+            from options: GenerationOptions,
+            base: SamplingConfiguration
+        ) -> SamplingConfiguration {
+            if let temperature = options.temperature {
+                return SamplingConfiguration(temperature: temperature)
+            }
+            return base
+        }
+    }
+}

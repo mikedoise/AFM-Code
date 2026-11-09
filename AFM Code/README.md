@@ -7,8 +7,9 @@ AFM Code is a SwiftUI desktop app that runs large language models locally on you
 ## Key Features
 
 - **On-device AI** — No API keys, no cloud. All inference runs locally on your Mac.
-- **Dual model backends**
+- **Local model backends**
   - **Apple Foundation Models (AFM)** — Native `FoundationModels` API with tool calling, reasoning, and vision support.
+  - **Core AI exports** — Choose an Apple-compatible `.aimodel` or complete text-language export folder. Uses Apple's CoreAILM adapter through Foundation Models. See [Core AI setup and validation](../docs/CORE_AI_MODELS.md).
   - **MLX models** — Download and run quantized models from Hugging Face (MLX format) via `mlx-swift-lm-afm`, with full parity: tool calling, reasoning, vision, and speculative decoding.
 - **Project-based workspaces** — Assign a folder as a project so the agent can read files, run shell commands, and use Git.
 - **Chat sessions** — Multi-turn conversations with context compaction (automatic history summarization when the context window fills).
@@ -16,7 +17,7 @@ AFM Code is a SwiftUI desktop app that runs large language models locally on you
 - **Approval system** — File writes and shell commands require user approval before execution. Configurable allow, always-allow, and deny.
 - **MCP servers** — Add [Model Context Protocol](https://modelcontextprotocol.io) servers (npx, uvx, or any executable) in Settings; their tools join project sessions namespaced as `mcp__<server>__<tool>`, each call still approval-gated, and results run through the same allow/always-allow/deny flow as commands. Ships with a built-in catalog (filesystem, git, fetch, memory, sequential-thinking).
 - **Vision support** — Paste or drag images into the chat input; vision-capable models (GPT-4o, Claude, Qwen3-VL, Gemma 4) can see them.
-- **Model picker** — Choose between AFM models and downloaded MLX models per session.
+- **Model picker** — Choose between AFM, imported Core AI exports and downloaded MLX models per session.
 - **Appearance settings** — Chat bubble styles, 15 color palettes, gradient backgrounds per model.
 - **VoiceOver support** — Full screen-reader parity with Perspective Intelligence: every message, sidebar row, model card, and status reads cleanly, with turn-lifecycle announcements and user-togglable preferences.
 - **Keyboard shortcuts** — The same keystrokes as Perspective Intelligence: stop/regenerate, copy, model picker, composer focus, session navigation, deletion, and recent sessions (see [Keyboard Shortcuts](#keyboard-shortcuts)).
@@ -100,7 +101,7 @@ xcodebuild -project "AFM Code.xcodeproj" -scheme "AFM Code" -configuration Debug
 
 1. Open the app. You'll see a sidebar with no projects.
 2. Click **Add Project** (or the `+` button) to select a folder on your Mac.
-3. The app will create a security-scoped bookmark to that folder.
+3. The app will save a bookmark to that folder; legacy security-scoped bookmarks remain supported.
 4. Start a new chat session. The model catalog will probe for available AFM models.
 5. Download an MLX model from Hugging Face via the **Models** tab in Settings.
 6. Select a model from the session's model badge (bottom-left of the composer).
@@ -175,11 +176,16 @@ The same keystrokes Perspective Intelligence provides, adapted to AFM Code's sin
 
 ## Privacy
 
-- All inference runs on-device. No data leaves your Mac.
-- MCP servers are user-managed extensions: a server like `fetch` sends its work to external services, and servers run inside the app sandbox (a filesystem server can only see what the app can see).
-- Projects are accessed via security-scoped bookmarks (sandbox-compatible).
-- No telemetry, no analytics, no cloud services.
+- Model inference runs on-device. Approved commands and enabled MCP servers can communicate with external services; local inference does not make those operations offline.
+- This is a non-App-Store desktop app with Hardened Runtime, without App Sandbox. Approved commands and enabled MCP servers run with normal Mac account permissions and may access locations outside a project. macOS privacy and filesystem permissions remain in effect.
+- File tools enforce the selected project root. Commands and mutating tools retain approval gates. Sandbox-era automatic grants are archived but inactive, and previously enabled MCP servers require re-enabling after review.
+- AFM Code does not add telemetry or analytics. Model downloads, approved commands, and configured MCP integrations may use external services.
 
 ## License
 
 Private project. All rights reserved.
+
+
+### Command environment diagnostics
+
+Project chats can use `environment_check` to distinguish available command paths from approval-gated execution probes for Python, GitHub CLI and other common tools. Reports omit environment values, credentials and raw probe output. Finding an executable does not establish execution capability, project dependencies or authentication. See [the diagnostic guide](../docs/ENVIRONMENT_DIAGNOSTICS.md) for measured desktop results and test instructions. See [desktop access and migration](../docs/DESKTOP_ACCESS.md) before the first launch.

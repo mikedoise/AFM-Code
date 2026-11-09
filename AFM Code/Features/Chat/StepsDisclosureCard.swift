@@ -70,14 +70,14 @@ struct StepsDisclosureCard: View {
                     .fill(Color.platformSeparator.opacity(0.08))
             }
         }
-        .onChange(of: pendingStep?.id) { oldID, newID in
+        .onChange(of: pendingStep?.id, initial: true) { oldID, newID in
             if pendingStep != nil {
                 isExpanded = true
             }
             // A new approval request appeared: the decision must be
             // heard, not just seen.  History rows carry no approval
             // service, so this only ever fires on the live row.
-            if newID != nil, oldID == nil,
+            if newID != nil, newID != oldID,
                settings.announceTypingWithVoiceOver {
                 let title = pendingStep?.title ?? "A change"
                 VoiceOverAnnouncer.announceImportant(

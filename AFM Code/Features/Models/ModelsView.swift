@@ -13,6 +13,7 @@ struct ModelsView: View {
 
     var body: some View {
         Form {
+            CoreAIModelsSection()
             searchSection
             if !mlx.results.isEmpty {
                 resultsSection

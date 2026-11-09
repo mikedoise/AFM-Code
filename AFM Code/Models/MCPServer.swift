@@ -25,6 +25,8 @@ final class MCPServer {
     var environmentRaw: String
     /// Disabled servers stay configured but their processes don't run.
     var isEnabled: Bool
+    var desktopAccessVersion: Int?
+    var wasEnabledInSandbox: Bool?
     /// The bundled catalog entry this row was made from; `nil` for
     /// servers the user added from scratch.
     var catalogID: String?
@@ -48,6 +50,7 @@ final class MCPServer {
         self.argumentsRaw = Self.encodeArray(arguments)
         self.environmentRaw = Self.encodeObject(environment)
         self.isEnabled = isEnabled
+        self.desktopAccessVersion = 1
         self.catalogID = catalogID
         self.addedAt = Date()
     }

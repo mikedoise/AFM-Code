@@ -126,7 +126,8 @@ struct MessageRowView: View {
     /// (newlines are fine for `accessibilityValue`).
     private var messageValue: String {
         let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? "\(isStreaming ? "Still working…" : "Empty message")" : text
+        let attachment = hasImage ? "Attached image: \(imageFilename ?? "image"). " : ""
+        return attachment + (text.isEmpty ? "\(isStreaming ? "Still working…" : "Empty message")" : text)
     }
 
     // MARK: - Body
@@ -141,6 +142,7 @@ struct MessageRowView: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(speakerName)
                     .accessibilityValue(messageValue)
+                    .accessibilityAction(named: Text("Copy message"), copyMessage)
                     .accessibilityAddTraits(isStreaming ? .updatesFrequently : [])
             } else {
                 assistantLayout
@@ -308,13 +310,11 @@ struct MessageRowView: View {
                     usesModelGradient: bubbleStyle.usesModelColors
                 )
                 .equatable()
-                // Collapse the rendered markdown (headers, code blocks,
-                // tables) into one element: "[model name], [reply text]".
-                // The thinking card and steps disclosure sit outside
-                // this element and keep their own accessibility.
-                .accessibilityElement(children: .ignore)
+                // Keep the renderer's headings, links, and table cells
+                // reachable instead of replacing them with raw markdown.
+                .accessibilityElement(children: .contain)
                 .accessibilityLabel(speakerName)
-                .accessibilityValue(messageValue)
+                .accessibilityAction(named: Text("Copy message"), copyMessage)
                 .accessibilityAddTraits(isStreaming ? .updatesFrequently : [])
             }
             if let steps, !steps.isEmpty {

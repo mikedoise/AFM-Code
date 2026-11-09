@@ -10,7 +10,7 @@ nonisolated struct RunCommandTool: Tool {
     let context: ToolContext
 
     let name = "run_command"
-    let description = "Run a shell command (zsh) in the project folder — builds, tests, linters, git, etc. The command runs with a timeout and its output is returned. Avoid long-running or interactive commands. Destructive commands should be described to the user in your reply."
+    let description = "Run a shell command (zsh) in the project folder — builds, tests, linters, git, etc. Use this tool for user-requested Git changes such as git pull, git fetch, git add, git commit, git merge, git switch or git push; the separate git tool is read-only. The command waits for project approval, then runs with a timeout and returns its output. Avoid long-running or interactive commands. Destructive commands should be described to the user in your reply."
 
     @Generable
     struct Arguments {
@@ -74,8 +74,15 @@ nonisolated struct RunCommandTool: Tool {
                 if run.exitCode != 0 {
                     output += "\n(exit code \(run.exitCode))"
                 }
+                if run.exitCode != 0, let hint = EnvironmentDiagnostics.failureHint(output: run.output, exitCode: run.exitCode) {
+                    output += "\nEnvironment hint: " + hint
+                }
                 return output
             } catch {
+                if error is CancellationError || Task.isCancelled {
+                    await context.updateStep(stepID, status: .cancelled, summary: "stopped")
+                    throw CancellationError()
+                }
                 let message = ReadFileTool.message(for: error)
                 await context.updateStep(stepID, status: .failed, summary: message)
                 return "run_command failed: \(message)"

@@ -3,10 +3,9 @@ import SwiftData
 
 /// A coding project: a named workspace rooted at a folder on disk.
 ///
-/// The folder is referenced by a **security-scoped bookmark** so the
-/// sandboxed app can read and write inside it. From Phase 3 on, all
-/// file and shell tools operate only within this root; nothing here
-/// ever writes outside it.
+/// Ordinary desktop bookmarks and legacy security-scoped bookmarks identify
+/// the folder. File tools enforce this root; approved shell commands run from
+/// it but may access other locations permitted to the user's Mac account.
 @Model
 final class Project {
     var id: UUID
@@ -23,14 +22,21 @@ final class Project {
     /// The MLX model's Hugging Face repository id for new sessions,
     /// when `modelKindRaw` is `"mlx"`.
     var mlxModelID: String?
+    /// Persistent identity of a user-selected Core AI export.
+    var coreAIModelID: String?
     /// Commands the user chose "Always Allow" for in this project.
-    /// Exact match after whitespace normalization. Optional (not an
+    /// Exact spelling, including quoted whitespace. Optional (not an
     /// empty array) so the schema migration can backfill existing
     /// rows with `nil`.
     var commandAllowlist: [String]?
     /// `ApprovalMode.rawValue` for this project. `nil` means "always
     /// ask". Optional so the schema migration backfills existing rows.
     var approvalModeRaw: String?
+    /// Nil on legacy rows. Versioned independently from display preferences.
+    var desktopAccessVersion: Int?
+    /// Inactive historical grants; never consulted by the approval service.
+    var sandboxCommandAllowlist: [String]?
+    var sandboxApprovalModeRaw: String?
     var createdAt: Date
     var lastOpenedAt: Date
 
@@ -42,6 +48,7 @@ final class Project {
         self.name = name
         self.folderName = folderName ?? name
         self.commandAllowlist = commandAllowlist
+        self.desktopAccessVersion = 1
         self.createdAt = Date()
         self.lastOpenedAt = Date()
     }
@@ -62,12 +69,15 @@ final class Project {
                 return .afmCore
             case .afmCoreAdvanced:
                 return .afmCoreAdvanced
+            case .coreAI:
+                return coreAIModelID.map { .coreAI(id: $0) }
             case .mlx:
                 if let mlxModelID { return .mlx(repoID: mlxModelID) }
                 return .bestAvailable
             }
         }
         set {
+            coreAIModelID = nil
             switch newValue ?? .bestAvailable {
             case .bestAvailable:
                 modelKindRaw = nil
@@ -77,6 +87,10 @@ final class Project {
                 mlxModelID = nil
             case .afmCoreAdvanced:
                 modelKindRaw = ModelDescriptor.Kind.afmCoreAdvanced.rawValue
+                mlxModelID = nil
+            case .coreAI(let id):
+                modelKindRaw = ModelDescriptor.Kind.coreAI.rawValue
+                coreAIModelID = id
                 mlxModelID = nil
             case .mlx(let repoID):
                 modelKindRaw = ModelDescriptor.Kind.mlx.rawValue

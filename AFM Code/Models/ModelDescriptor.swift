@@ -14,6 +14,7 @@ struct ModelDescriptor: Identifiable, Hashable, Sendable {
         case afmCore = "afm-core"
         case afmCoreAdvanced = "afm-core-advanced"
         case mlx = "mlx"
+        case coreAI = "core-ai"
     }
 
     let kind: Kind
@@ -25,11 +26,16 @@ struct ModelDescriptor: Identifiable, Hashable, Sendable {
     var capabilities: Set<String>
     /// The Hugging Face repository id, when `kind == .mlx`.
     var mlxRepoID: String? = nil
+    var coreAIModelID: String? = nil
 
     /// Unique per model: the kind, plus the repository for MLX models
     /// (two Hub models are different models).
     var id: String {
-        kind == .mlx ? "mlx:\(mlxRepoID ?? "?")" : kind.rawValue
+        switch kind {
+        case .mlx: "mlx:\(mlxRepoID ?? "?")"
+        case .coreAI: "core-ai:\(coreAIModelID ?? "?")"
+        default: kind.rawValue
+        }
     }
 
     init(
@@ -40,7 +46,8 @@ struct ModelDescriptor: Identifiable, Hashable, Sendable {
         availabilityDetail: String? = nil,
         contextSize: Int? = nil,
         capabilities: Set<String> = [],
-        mlxRepoID: String? = nil
+        mlxRepoID: String? = nil,
+        coreAIModelID: String? = nil
     ) {
         self.kind = kind
         self.displayName = displayName
@@ -50,6 +57,7 @@ struct ModelDescriptor: Identifiable, Hashable, Sendable {
         self.contextSize = contextSize
         self.capabilities = capabilities
         self.mlxRepoID = mlxRepoID
+        self.coreAIModelID = coreAIModelID
     }
 }
 
@@ -60,4 +68,5 @@ enum ModelSelection: Hashable, Sendable {
     case afmCore
     case afmCoreAdvanced
     case mlx(repoID: String)
+    case coreAI(id: String)
 }

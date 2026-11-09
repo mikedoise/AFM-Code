@@ -31,7 +31,7 @@ struct MCPServersView: View {
             } header: {
                 Text("Model Context Protocol")
             } footer: {
-                Text("Each server runs as a local process over stdio, and its tools become available to project sessions as mcp__<server>__<tool>. Tool calls still go through the approval flow. Servers run inside the app sandbox: filesystem servers see what the app can see.")
+                Text("Each server runs as a local process over stdio, and its tools become available to project sessions as mcp__<server>__<tool>. Tool calls still go through the approval flow. Servers run with your normal Mac account permissions and may access files beyond a project. Previously enabled sandbox servers were disabled for review; explicitly re-enable only servers you trust.")
             }
 
             builtInSection
@@ -106,7 +106,7 @@ struct MCPServersView: View {
             }
             Spacer()
             if let configured {
-                Toggle("", isOn: Binding(
+                Toggle("Enable \(configured.name)", isOn: Binding(
                     get: { configured.isEnabled },
                     set: { _ in
                         configured.isEnabled.toggle()
@@ -171,6 +171,7 @@ struct MCPServersView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .help("Reconnect")
+                    .accessibilityLabel("Reconnect \(server.name)")
                 }
                 Button {
                     editing = server
@@ -180,6 +181,7 @@ struct MCPServersView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
                 .help("Edit")
+                .accessibilityLabel("Edit \(server.name)")
                 Button {
                     pendingDelete = server
                 } label: {
@@ -188,7 +190,8 @@ struct MCPServersView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
                 .help("Delete")
-                Toggle("", isOn: Binding(
+                .accessibilityLabel("Delete \(server.name)")
+                Toggle("Enable \(server.name)", isOn: Binding(
                     get: { server.isEnabled },
                     set: { _ in
                         server.isEnabled.toggle()

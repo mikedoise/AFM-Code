@@ -1,13 +1,15 @@
 import Foundation
 import Observation
+import OSLog
 
 /// The per-session runtime that the coding tools use.
 ///
 /// Tools are plain structs, so their per-session state lives here: the
 /// project folder (via `Workspace`), the approval service, and the live
-/// tool steps surfaced in the chat. Every file and shell operation is
-/// sandboxed to the project root — nothing in here can touch anything
-/// outside it.
+/// tool steps surfaced in the chat. File paths are checked against the
+/// project root by the file APIs. Approved shell commands
+/// use that root as their working directory; their access is limited by the
+/// normal macOS account permissions, not by the working directory alone.
 @MainActor
 @Observable
 final class ToolContext {
@@ -60,6 +62,7 @@ final class ToolContext {
         step.diff = diff
         step.command = command
         steps.append(step)
+        logFileChangeStatus(step)
         return step.id
     }
 
@@ -79,6 +82,51 @@ final class ToolContext {
         if let detail { steps[index].detail = Self.capped(detail) }
         if let diff { steps[index].diff = diff }
         if let command { steps[index].command = command }
+        if status != nil { logFileChangeStatus(steps[index]) }
+    }
+
+    // File diagnostics contain only generated IDs, fixed lifecycle labels and
+    // error codes. Never log paths, contents, arguments, diffs or descriptions.
+    private static let fileLogger = Logger(subsystem: "dev.afmcode", category: "FileChanges")
+    enum FileChangePhase: String { case preparation, apply }
+
+    private func logFileChangeStatus(_ step: ToolStep) {
+        guard step.kind == .write || step.kind == .edit else { return }
+        Self.fileLogger.notice("File change id=\(step.id.uuidString, privacy: .public) kind=\(step.kind.rawValue, privacy: .public) status=\(step.status.rawValue, privacy: .public)")
+    }
+
+    func recordFileChangeFailure(_ id: UUID, phase: FileChangePhase, error: any Error) {
+        let code = Self.fileChangeFailureCode(error)
+        Self.fileLogger.error("File change id=\(id.uuidString, privacy: .public) phase=\(phase.rawValue, privacy: .public) reason=\(code, privacy: .public)")
+    }
+
+    static func fileChangeFailureCode(_ error: any Error) -> String {
+        if let error = error as? PreparedFileChange.ChangeError {
+            switch error {
+            case .tooLarge: return "review_limit"
+            case .invalidFile: return "invalid_file_type"
+            case .invalidUTF8: return "invalid_utf8"
+            case .missingFile: return "missing_file"
+            case .emptySearch: return "empty_search"
+            case .noMatch: return "no_match"
+            case .ambiguous: return "ambiguous_match"
+            case .stale: return "stale_preview"
+            }
+        }
+        if let error = error as? ToolError {
+            switch error {
+            case .folderUnavailable: return "folder_unavailable"
+            case .pathEscape: return "outside_project"
+            case .io: return "path_or_io"
+            }
+        }
+        if error is CancellationError { return "cancelled" }
+        let failure = error as NSError
+        switch failure.domain {
+        case NSCocoaErrorDomain: return "cocoa_\(failure.code)"
+        case NSPOSIXErrorDomain: return "posix_\(failure.code)"
+        default: return "other"
+        }
     }
 
     /// UI detail payloads are capped so persisted history stays light.
@@ -124,8 +172,7 @@ final class ToolContext {
             ? URL(fileURLWithPath: trimmed)
             : root.appendingPathComponent(trimmed)
         let resolved = candidate.standardizedFileURL
-        let rootPath = root.standardizedFileURL.path
-        guard resolved.path == rootPath || resolved.path.hasPrefix(rootPath + "/") else {
+        guard isInsideRoot(resolved) else {
             throw ToolError.pathEscape(path)
         }
         return resolved
@@ -134,9 +181,9 @@ final class ToolContext {
     /// True when `url` is the project root or inside it.
     func isInsideRoot(_ url: URL) -> Bool {
         guard let root = rootURL else { return false }
-        let path = url.standardizedFileURL.path
-        let rootPath = root.standardizedFileURL.path
-        return path == rootPath || path.hasPrefix(rootPath + "/")
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+        return path == rootPath || path.hasPrefix(rootPath == "/" ? "/" : rootPath + "/")
     }
 
     // MARK: - File operations
@@ -198,8 +245,12 @@ final class ToolContext {
         let allLines = text.components(separatedBy: "\n")
         let total = allLines.count
         let start = max(1, startLine ?? 1)
-        let limit = min(maxLines ?? 500, maxReadLines)
-        let end = min(start + limit - 1, total)
+        let limit = min(max(0, maxLines ?? 500), maxReadLines)
+        guard start <= total, limit > 0 else {
+            return ReadResult(output: "", lineCount: 0, truncated: byteTruncated || (limit == 0 && start <= total))
+        }
+        // Subtract before adding: model-supplied Int.max must not overflow.
+        let end = start - 1 + min(limit, total - (start - 1))
 
         let width = max(4, "\(total)".count)
         let shown = allLines[(start - 1)..<end].enumerated().map { index, line in
@@ -232,105 +283,47 @@ final class ToolContext {
             return nil
         }
         let lines = content.components(separatedBy: "\n")
-        guard lines.count > maxLines else { return content }
-        return lines.prefix(maxLines).joined(separator: "\n")
+        let limit = max(0, maxLines)
+        guard lines.count > limit else { return content }
+        return lines.prefix(limit).joined(separator: "\n")
     }
 
-    func writeFile(path: String, content: String) throws -> String {
+    // MARK: - Immutable, full-file change proposals
+
+    private func changeSnapshot(path: String) throws -> PreparedFileChange.Snapshot {
         let url = try resolvePath(path)
-        guard let summary = try workspace.withAccess({ _ in
-            try Self.writeText(url: url, content: content, displayPath: path)
-        }) else {
-            throw ToolError.folderUnavailable
-        }
-        return summary
+        guard let snapshot = try workspace.withAccess({ root in
+            let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
+            let target = url.resolvingSymlinksInPath().standardizedFileURL.path
+            guard target.hasPrefix(canonicalRoot + "/") else { throw ToolError.pathEscape(path) }
+            return try PreparedFileChange.Snapshot.read(at: url)
+        }) else { throw ToolError.folderUnavailable }
+        return snapshot
     }
 
-    private static func writeText(url: URL, content: String, displayPath: String) throws -> String {
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try content.write(to: url, atomically: true, encoding: .utf8)
-        return "Wrote \(content.utf8.count) bytes to \(displayPath)."
-    }
-
-    func editFile(path: String, find: String, replace: String, replaceAll: Bool) throws -> String {
-        let url = try resolvePath(path)
-        guard let summary = try workspace.withAccess({ _ in
-            try Self.applyEdit(url: url, find: find, replace: replace, replaceAll: replaceAll, displayPath: path)
-        }) else {
-            throw ToolError.folderUnavailable
-        }
-        return summary
-    }
-
-    private static func applyEdit(
-        url: URL,
-        find: String,
-        replace: String,
-        replaceAll: Bool,
-        displayPath: String
-    ) throws -> String {
-        guard !find.isEmpty else {
-            throw ToolError.io("The search text is empty.")
-        }
-        guard let current = try? String(contentsOf: url, encoding: .utf8) else {
-            throw ToolError.io("Could not read \(displayPath). Check the path and try again.")
-        }
-        let count = current.components(separatedBy: find).count - 1
-        guard count > 0 else {
-            throw ToolError.io("The search text does not appear in \(displayPath). Re-read the file — it may have changed since you last saw it.")
-        }
-        guard count == 1 || replaceAll else {
-            throw ToolError.io("The search text appears \(count) times in \(displayPath). Make it more specific (include surrounding lines) or set replaceAll to true.")
-        }
-        let updated = current.replacingOccurrences(of: find, with: replace)
-        try updated.write(to: url, atomically: true, encoding: .utf8)
-        let what = count == 1 ? "1 replacement" : "\(count) replacements"
-        return "Edited \(displayPath) (\(what))."
-    }
-
-    // MARK: - Diff previews (for pending write/edit steps)
-
-    func previewDiffForWrite(path: String, newContent: String) async -> DiffData {
-        let relative = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        // The file read stays on the main actor (under the
-        // security-scoped lease); the line split and LCS diff — the
-        // heavy part — run off it so the approval card appears fast.
-        let existing = (try? readFileContent(path: path)) ?? ""
-        return await Task.detached(priority: .userInitiated) {
-            let oldLines: [String]
-            if existing.isEmpty {
-                oldLines = []
-            } else {
-                oldLines = Array(existing.components(separatedBy: "\n").prefix(4000))
-            }
-            let newLines = Array(newContent.components(separatedBy: "\n").prefix(4000))
-            return LineDiff.compute(path: relative, old: oldLines, new: newLines)
+    func prepareWrite(path: String, content: String) async throws -> PreparedFileChange {
+        let snapshot = try changeSnapshot(path: path)
+        return try await Task.detached(priority: .userInitiated) {
+            try PreparedFileChange.write(snapshot: snapshot, path: path, content: content)
         }.value
     }
 
-    func previewDiffForEdit(path: String, find: String, replace: String, replaceAll: Bool) async -> DiffData {
-        let relative = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        let current = (try? readFileContent(path: path)) ?? ""
-        return await Task.detached(priority: .userInitiated) {
-            let oldLines: [String]
-            if current.isEmpty {
-                oldLines = []
-            } else {
-                oldLines = Array(current.components(separatedBy: "\n").prefix(4000))
-            }
-            let updated = oldLines.joined(separator: "\n").replacingOccurrences(of: find, with: replace)
-            let newLines = Array(updated.components(separatedBy: "\n").prefix(4000))
-            if oldLines == newLines {
-                return DiffData(
-                    path: relative,
-                    isNewFile: false,
-                    lines: [DiffData.Line(kind: .context, text: "(no changes)")],
-                    truncated: false
-                )
-            }
-            return LineDiff.compute(path: relative, old: oldLines, new: newLines)
+    func prepareEdit(path: String, find: String, replace: String, replaceAll: Bool) async throws -> PreparedFileChange {
+        let snapshot = try changeSnapshot(path: path)
+        return try await Task.detached(priority: .userInitiated) {
+            try PreparedFileChange.edit(snapshot: snapshot, path: path, find: find, replace: replace, replaceAll: replaceAll)
         }.value
+    }
+
+    func applyChange(_ change: PreparedFileChange) throws -> String {
+        try Task.checkCancellation()
+        guard let summary = try workspace.withAccess({ root in
+            let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
+            let target = change.snapshot.url.resolvingSymlinksInPath().standardizedFileURL.path
+            guard target.hasPrefix(canonicalRoot + "/") else { throw ToolError.pathEscape(change.diff.path) }
+            return try change.apply()
+        }) else { throw ToolError.folderUnavailable }
+        return summary
     }
 
     // MARK: - Directory listing
@@ -357,6 +350,7 @@ final class ToolContext {
             var entries = 0
             Self.walk(
                 target, depth: 0, maxDepth: depth,
+                root: root.resolvingSymlinksInPath().standardizedFileURL,
                 lines: &lines, counter: &entries
             )
             if lines.isEmpty {
@@ -377,13 +371,16 @@ final class ToolContext {
         _ url: URL,
         depth: Int,
         maxDepth: Int,
+        root: URL,
         lines: inout [String],
         counter: inout Int
     ) {
+        let canonicalPath = url.resolvingSymlinksInPath().standardizedFileURL.path
+        guard canonicalPath == root.path || canonicalPath.hasPrefix(root.path == "/" ? "/" : root.path + "/") else { return }
         guard depth < maxDepth, counter < maxListEntries,
               let contents = try? FileManager.default.contentsOfDirectory(
                 at: url,
-                includingPropertiesForKeys: [.isDirectoryKey],
+                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
                 options: [.skipsHiddenFiles]
               ) else { return }
 
@@ -402,10 +399,15 @@ final class ToolContext {
             }
             counter += 1
             let name = entry.lastPathComponent
+            // Display links, but never recursively follow them (including cycles).
+            if (try? entry.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true {
+                lines.append("\(indent)\(name) → (symbolic link)")
+                continue
+            }
             if let values = try? entry.resourceValues(forKeys: [.isDirectoryKey]), values.isDirectory == true {
                 if skippedDirectories.contains(name) { continue }
                 lines.append("\(indent)\(name)/")
-                walk(entry, depth: depth + 1, maxDepth: maxDepth, lines: &lines, counter: &counter)
+                walk(entry, depth: depth + 1, maxDepth: maxDepth, root: root, lines: &lines, counter: &counter)
             } else {
                 lines.append("\(indent)\(name)")
             }
@@ -414,8 +416,10 @@ final class ToolContext {
 
     // MARK: - Shell
     //
-    // Search and run_command both execute through a login shell with the
-    // project root as cwd, under the workspace lease, with a hard timeout.
+    // Search and run_command execute through a non-login command shell with the
+    // already captured/augmented environment and project root as cwd, under
+    // the workspace lease, with a hard timeout. A second login initialization
+    // would undo PATH augmentation and select sandbox-hostile xcrun shims.
     // Output is drained into bounded captures so a chatty (or grandchild-
     // holding) process can never block the turn.
 
@@ -451,15 +455,15 @@ final class ToolContext {
             .first { FileManager.default.isExecutableFile(atPath: $0) }
         let command: String
         if let rg {
-            command = "\(rg) -n --no-heading --max-count 50 -- \(Self.shellQuote(pattern)) \(Self.shellQuote(searchPath))"
+            command = "\(rg) --no-config -n --no-heading --max-count 50 -- \(Self.shellQuote(pattern)) \(Self.shellQuote(searchPath))"
         } else {
             command = "grep -rn --binary-files=no-match -- \(Self.shellQuote(pattern)) \(Self.shellQuote(searchPath))"
         }
 
-        let environment = await ShellEnvironment.resolved()
+        let environment = Self.readOnlyEnvironment(ShellEnvironment.inspectionSnapshot().environment)
         let result = try await withLease {
             try await Self.runProcess(
-                arguments: ["-lc", command],
+                arguments: ["-f", "-c", command],
                 workingDirectory: root,
                 timeout: 15,
                 maxOutputBytes: 16 * 1024,
@@ -477,14 +481,37 @@ final class ToolContext {
         return "Found \(lines.count) matching line\(lines.count == 1 ? "" : "s"):\n\(shown)" + (extra > 0 ? "\n… (\(extra) more matches)" : "")
     }
 
+    /// Built-in read helpers must not run user startup files or inherit
+    /// arbitrary execution hooks from login exports. They use trusted system/
+    /// developer command locations; approved run_command retains the host PATH.
+    nonisolated static func readOnlyEnvironment(_ base: [String: String]) -> [String: String] {
+        var env: [String: String] = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "GIT_TERMINAL_PROMPT": "0"]
+        for key in ["HOME", "USER", "LOGNAME", "TMPDIR", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"] {
+            if let value = base[key] { env[key] = value }
+        }
+        if let developer = ShellEnvironment.developerUSRBIN() { env["PATH"] = developer + ":" + env["PATH"]! }
+        return env
+    }
+
+    func runReadOnlyCommand(command: String, timeout: Double) async throws -> ProcessRun {
+        guard let root = rootURL else { throw ToolError.folderUnavailable }
+        let environment = Self.readOnlyEnvironment(ShellEnvironment.inspectionSnapshot().environment)
+        let result = try await withLease {
+            try await Self.runProcess(arguments: ["-f", "-c", command], workingDirectory: root,
+                timeout: timeout, maxOutputBytes: 16 * 1024, environment: environment)
+        }
+        guard let result else { throw ToolError.folderUnavailable }
+        return result
+    }
+
     func runCommand(command: String, timeout: Double) async throws -> ProcessRun {
         guard let root = rootURL else { throw ToolError.folderUnavailable }
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw ToolError.io("Empty command.") }
-        let environment = await ShellEnvironment.resolved()
+        let environment = Self.commandEnvironment(await ShellEnvironment.resolved() ?? ProcessInfo.processInfo.environment)
         let run = try await withLease {
             try await Self.runProcess(
-                arguments: ["-lc", trimmed],
+                arguments: ["-c", trimmed],
                 workingDirectory: root,
                 timeout: min(max(timeout, 1), 300),
                 maxOutputBytes: 16 * 1024,
@@ -495,46 +522,65 @@ final class ToolContext {
         return run
     }
 
+    /// Probe the exact displayed executable with the same captured environment
+    /// used for discovery. Caller owns approval; raw output is never persisted.
+    func runEnvironmentProbe(command: String, environment: [String: String]) async throws -> ProcessRun {
+        guard let root = rootURL else { throw ToolError.folderUnavailable }
+        var env = Self.commandEnvironment(environment)
+        env["GH_NO_UPDATE_NOTIFIER"] = "1"
+        env["GH_NO_EXTENSION_UPDATE_NOTIFIER"] = "1"
+        let result = try await withLease {
+            try await Self.runProcess(arguments: ["-c", command], workingDirectory: root,
+                timeout: 10, maxOutputBytes: 4096, environment: env)
+        }
+        guard let result else { throw ToolError.folderUnavailable }
+        return result
+    }
+
+    /// Commands have no interactive input. Respect explicit user settings,
+    /// but otherwise let Git report missing terminal credentials promptly.
+    nonisolated static func commandEnvironment(_ base: [String: String]) -> [String: String] {
+        var environment = base
+        if environment["GIT_TERMINAL_PROMPT"] == nil { environment["GIT_TERMINAL_PROMPT"] = "0" }
+        return environment
+    }
+
     static func shellQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    /// A bounded, lock-protected sink for pipe output.
+    /// A bounded pipe sink drained only by the command task.
     nonisolated private final class PipedCapture: @unchecked Sendable {
-        private let lock = NSLock()
-        private var data = Data()
+        private(set) var data = Data()
         private let limit: Int
-        private var finished = false
+        private(set) var isFinished = false
 
-        init(limit: Int) {
-            self.limit = limit
-        }
+        init(limit: Int) { self.limit = max(0, limit) }
+        var snapshot: Data { data }
 
-        func append(_ chunk: Data) {
-            lock.withLock {
-                guard data.count < limit else { return }
-                data.append(chunk.prefix(limit - data.count))
+        // Nonblocking, bounded work per poll: neither a quiet descendant nor
+        // an endlessly writing command can prevent timeout/cancellation checks.
+        func drain(_ descriptor: Int32) {
+            guard !isFinished else { return }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            for _ in 0..<16 {
+                let count = read(descriptor, &buffer, buffer.count)
+                if count > 0 {
+                    data.append(contentsOf: buffer.prefix(min(count, max(0, limit - data.count))))
+                } else if count == 0 {
+                    isFinished = true
+                    return
+                } else if errno != EINTR {
+                    if errno != EAGAIN && errno != EWOULDBLOCK { isFinished = true }
+                    return
+                }
             }
-        }
-
-        var snapshot: Data {
-            lock.withLock { data }
-        }
-
-        var isFinished: Bool {
-            lock.withLock { finished }
-        }
-
-        func finish() {
-            lock.withLock { finished = true }
         }
     }
 
-    /// Run a shell command with a hard timeout and capped output.
-    ///
-    /// `environment` replaces the inherited app environment (a minimal
-    /// `launchd` PATH) with the user's real terminal environment, so
-    /// the user's tools — brew, uv, cargo, … — are on the PATH.
+    /// Run in an isolated process group with closed stdin and capped output.
+    /// Preserve the captured terminal environment and requested working directory.
+    /// Background jobs belong to this invocation, and are stopped when it ends.
     nonisolated static func runProcess(
         arguments: [String],
         workingDirectory: URL,
@@ -542,79 +588,124 @@ final class ToolContext {
         maxOutputBytes: Int,
         environment: [String: String]? = nil
     ) async throws -> ProcessRun {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = arguments
-        process.currentDirectoryURL = workingDirectory
-        if let environment {
-            process.environment = environment
-        }
-
+        try Task.checkCancellation()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        do {
-            try process.run()
-        } catch {
-            throw ToolError.io("Could not start the command: \(error.localizedDescription)")
+        defer {
+            try? stdoutPipe.fileHandleForReading.close()
+            try? stderrPipe.fileHandleForReading.close()
         }
-
-        let stdoutBox = PipedCapture(limit: maxOutputBytes)
-        let stderrBox = PipedCapture(limit: max(maxOutputBytes / 2, 4096))
-        // The drains run on; they finish at pipe EOF. A surviving
-        // grandchild may hold the pipe open — harmless: the drain just
-        // blocks until that process exits.
-        _ = Task.detached { Self.drain(stdoutPipe, into: stdoutBox) }
-        _ = Task.detached { Self.drain(stderrPipe, into: stderrBox) }
-
-        var timedOut = false
-        do {
-            try await Task.sleep(for: .seconds(timeout))
-        } catch {
-            // The surrounding task was cancelled — clean up and bail.
-        }
-        if process.isRunning {
-            timedOut = true
-            process.terminate()
-            try? await Task.sleep(for: .seconds(1))
-            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-        }
-
-        // Give the drains a short grace period, then take what we have.
-        // (A surviving grandchild could otherwise hold the pipe open.)
-        for _ in 0..<20 {
-            if stdoutBox.isFinished && stderrBox.isFinished { break }
-            do {
-                try await Task.sleep(for: .milliseconds(100))
-            } catch {
-                break // cancelled — take the snapshot immediately
+        let stdoutFD = stdoutPipe.fileHandleForReading.fileDescriptor
+        let stderrFD = stderrPipe.fileHandleForReading.fileDescriptor
+        var actions: posix_spawn_file_actions_t?
+        var attributes: posix_spawnattr_t?
+        func checked(_ code: Int32) throws {
+            guard code == 0 else {
+                throw ToolError.io("Could not start the command: \(String(cString: strerror(code)))")
             }
         }
-
+        try checked(posix_spawn_file_actions_init(&actions))
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        try checked(posix_spawnattr_init(&attributes))
+        defer { posix_spawnattr_destroy(&attributes) }
+        // Raw spawn must not expose unrelated app descriptors to commands.
+        // The explicit open/dup2 actions below preserve only command stdio.
+        try checked(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)))
+        // Group 0 here means the new child's own PID, not our process group.
+        try checked(posix_spawnattr_setpgroup(&attributes, 0))
+        if #available(macOS 26.0, *) {
+            try checked(posix_spawn_file_actions_addchdir(&actions, workingDirectory.path))
+        } else {
+            try checked(posix_spawn_file_actions_addchdir_np(&actions, workingDirectory.path))
+        }
+        try checked(posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0))
+        try checked(posix_spawn_file_actions_adddup2(&actions, stdoutPipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO))
+        try checked(posix_spawn_file_actions_adddup2(&actions, stderrPipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO))
+        for fd in [stdoutFD, stderrFD, stdoutPipe.fileHandleForWriting.fileDescriptor, stderrPipe.fileHandleForWriting.fileDescriptor] {
+            try checked(posix_spawn_file_actions_addclose(&actions, fd))
+        }
+        for fd in [stdoutFD, stderrFD] {
+            let flags = fcntl(fd, F_GETFL)
+            guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0 else {
+                throw ToolError.io("Could not configure command output pipes.")
+            }
+        }
+        let argv = (["/bin/zsh"] + arguments).map { strdup($0) } + [nil]
+        let envp = (environment ?? ProcessInfo.processInfo.environment).map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer {
+            for pointer in argv { free(pointer) }
+            for pointer in envp { free(pointer) }
+        }
+        var pid: pid_t = 0
+        let spawnError = argv.withUnsafeBufferPointer { argvBuffer in
+            envp.withUnsafeBufferPointer { envBuffer in
+                posix_spawn(&pid, "/bin/zsh", &actions, &attributes, argvBuffer.baseAddress!, envBuffer.baseAddress!)
+            }
+        }
+        try? stdoutPipe.fileHandleForWriting.close()
+        try? stderrPipe.fileHandleForWriting.close()
+        try checked(spawnError)
+        // Keep the leader unreaped until after the final group signal. Its PID
+        // therefore cannot be recycled as an unrelated process/group identifier.
+        var reaped = false
+        defer {
+            if !reaped && pid > 0 {
+                kill(-pid, SIGKILL)
+                var status: Int32 = 0
+                while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
+            }
+        }
+        let stdoutBox = PipedCapture(limit: maxOutputBytes)
+        let stderrBox = PipedCapture(limit: max(maxOutputBytes / 2, 4096))
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(timeout))
+        var timedOut = false
+        while true {
+            stdoutBox.drain(stdoutFD)
+            stderrBox.drain(stderrFD)
+            var info = siginfo_t()
+            let result = waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG | WNOWAIT)
+            if result < 0 && errno != EINTR {
+                let error = errno
+                // If another reaper removed our child, its PID is no longer
+                // reserved. Never signal a potentially recycled group ID.
+                if error == ECHILD { reaped = true }
+                throw ToolError.io("Could not inspect command status: \(String(cString: strerror(error)))")
+            }
+            if result == 0 && info.si_pid == pid { break }
+            if Task.isCancelled { break }
+            if clock.now >= deadline { timedOut = true; break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        // Stop every ordinary shell/subshell/ssh/git descendant, including ones
+        // ignoring TERM or keeping output open after the shell itself exits.
+        // Deliberately detached sessions are outside a process group's scope.
+        // Termination is not rollback: partial writes and Git lock files may
+        // remain. Inspect them before retrying; never remove locks automatically.
+        if pid > 0 { kill(-pid, SIGKILL) }
+        var status: Int32 = 0
+        var waited: pid_t
+        repeat { waited = waitpid(pid, &status, 0) } while waited < 0 && errno == EINTR
+        reaped = true
+        guard waited == pid else { throw ToolError.io("Could not collect command exit status.") }
+        // Drains never block or outlive this call, even if a detached process
+        // inherited a pipe. Preserve buffered diagnostics before returning.
+        let drainDeadline = clock.now.advanced(by: .milliseconds(200))
+        repeat {
+            stdoutBox.drain(stdoutFD)
+            stderrBox.drain(stderrFD)
+            if stdoutBox.isFinished && stderrBox.isFinished { break }
+            if Task.isCancelled { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        } while clock.now < drainDeadline
+        try Task.checkCancellation()
         var output = String(decoding: stdoutBox.snapshot, as: UTF8.self)
         let stderr = String(decoding: stderrBox.snapshot, as: UTF8.self)
-        if !stderr.isEmpty {
-            output += (output.isEmpty ? "" : "\n") + stderr
-        }
-
-        return ProcessRun(
-            exitCode: process.terminationStatus,
-            output: output,
-            timedOut: timedOut
-        )
-    }
-
-    /// Read a pipe until EOF, appending into the capture (capped).
-    nonisolated private static func drain(_ pipe: Pipe, into box: PipedCapture) {
-        let handle = pipe.fileHandleForReading
-        while true {
-            let chunk = handle.availableData
-            box.append(chunk)
-            if chunk.isEmpty { break } // EOF
-        }
-        box.finish()
+        if !stderr.isEmpty { output += (output.isEmpty ? "" : "\n") + stderr }
+        // Swift cannot import the C function-like WIFEXITED/WEXITSTATUS macros.
+        let signal = status & 0x7f
+        let exitCode = signal == 0 ? (status >> 8) & 0xff : signal
+        return ProcessRun(exitCode: exitCode, output: output, timedOut: timedOut)
     }
 
     // MARK: - Formatting helpers

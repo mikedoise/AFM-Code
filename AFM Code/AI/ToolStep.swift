@@ -78,6 +78,18 @@ struct ToolStep: Identifiable, Codable, Equatable, Sendable {
         }
     }
 
+    var accessibilityStatus: String {
+        switch status {
+        case .running: return "Running"
+        case .awaiting: return "Awaiting approval"
+        case .approved: return "Approved and running"
+        case .denied: return "Denied"
+        case .done: return "Completed"
+        case .failed: return "Failed"
+        case .cancelled: return "Cancelled"
+        }
+    }
+
     var statusIcon: String {
         switch status {
         case .running, .approved: return "clock"
@@ -150,54 +162,46 @@ nonisolated enum LineDiff {
         maxLines: Int = 400
     ) -> DiffData {
         let isNewFile = old.isEmpty
+        // Most edits touch a small region even in a very large file. Remove
+        // identical edges before the bounded LCS, never before validation.
+        var prefix = 0
+        while prefix < min(old.count, new.count), old[prefix].utf8.elementsEqual(new[prefix].utf8) { prefix += 1 }
+        var suffix = 0
+        while suffix < min(old.count, new.count) - prefix,
+              old[old.count - suffix - 1].utf8.elementsEqual(new[new.count - suffix - 1].utf8) { suffix += 1 }
+        let before = Array(old[prefix..<(old.count - suffix)])
+        let after = Array(new[prefix..<(new.count - suffix)])
+        var lines = old.prefix(prefix).map { DiffData.Line(kind: .context, text: $0) }
+        let m = before.count
+        let n = after.count
 
-        guard Double(old.count) * Double(new.count) < 16_000_000 else {
-            return wholeReplace(path: path, old: old, new: new, isNewFile: isNewFile, maxLines: maxLines)
-        }
-
-        let m = old.count
-        let n = new.count
-        var dp = [[Int]](repeating: [Int](repeating: 0, count: n + 1), count: m + 1)
-        for i in stride(from: m - 1, through: 0, by: -1) {
-            for j in stride(from: n - 1, through: 0, by: -1) {
-                dp[i][j] = old[i] == new[j]
-                    ? dp[i + 1][j + 1] + 1
-                    : max(dp[i + 1][j], dp[i][j + 1])
+        if Double(m) * Double(n) > 1_000_000 {
+            // Bounded work: show the entire changed region as a replacement.
+            // No changed line is dropped, even when a minimal diff is costly.
+            lines += before.map { DiffData.Line(kind: .removal, text: $0) }
+            lines += after.map { DiffData.Line(kind: .addition, text: $0) }
+        } else {
+            var dp = [[Int]](repeating: [Int](repeating: 0, count: n + 1), count: m + 1)
+            for i in stride(from: m - 1, through: 0, by: -1) {
+                for j in stride(from: n - 1, through: 0, by: -1) {
+                    dp[i][j] = before[i].utf8.elementsEqual(after[j].utf8) ? dp[i + 1][j + 1] + 1 : max(dp[i + 1][j], dp[i][j + 1])
+                }
             }
-        }
-
-        var lines: [DiffData.Line] = []
-        lines.reserveCapacity(m + n)
-        var i = 0
-        var j = 0
-        while i < m && j < n {
-            if old[i] == new[j] {
-                lines.append(DiffData.Line(kind: .context, text: old[i]))
-                i += 1
-                j += 1
-            } else if dp[i + 1][j] >= dp[i][j + 1] {
-                lines.append(DiffData.Line(kind: .removal, text: old[i]))
-                i += 1
-            } else {
-                lines.append(DiffData.Line(kind: .addition, text: new[j]))
-                j += 1
+            var i = 0
+            var j = 0
+            while i < m && j < n {
+                if before[i].utf8.elementsEqual(after[j].utf8) {
+                    lines.append(DiffData.Line(kind: .context, text: before[i])); i += 1; j += 1
+                } else if dp[i + 1][j] >= dp[i][j + 1] {
+                    lines.append(DiffData.Line(kind: .removal, text: before[i])); i += 1
+                } else {
+                    lines.append(DiffData.Line(kind: .addition, text: after[j])); j += 1
+                }
             }
+            while i < m { lines.append(DiffData.Line(kind: .removal, text: before[i])); i += 1 }
+            while j < n { lines.append(DiffData.Line(kind: .addition, text: after[j])); j += 1 }
         }
-        while i < m { lines.append(DiffData.Line(kind: .removal, text: old[i])); i += 1 }
-        while j < n { lines.append(DiffData.Line(kind: .addition, text: new[j])); j += 1 }
-
-        return finish(path: path, isNewFile: isNewFile, raw: lines, maxLines: maxLines)
-    }
-
-    private static func wholeReplace(
-        path: String,
-        old: [String],
-        new: [String],
-        isNewFile: Bool,
-        maxLines: Int
-    ) -> DiffData {
-        var lines: [DiffData.Line] = old.map { DiffData.Line(kind: .removal, text: $0) }
-        lines.append(contentsOf: new.map { DiffData.Line(kind: .addition, text: $0) })
+        lines += old.suffix(suffix).map { DiffData.Line(kind: .context, text: $0) }
         return finish(path: path, isNewFile: isNewFile, raw: lines, maxLines: maxLines)
     }
 
@@ -233,7 +237,7 @@ nonisolated enum LineDiff {
 
         var truncated = false
         if condensed.count > maxLines {
-            condensed = Array(condensed.prefix(maxLines - 1))
+            condensed = Array(condensed.prefix(max(0, maxLines - 1)))
             condensed.append(DiffData.Line(kind: .context, text: "⋯ diff truncated (\(condensed.count + 1) lines shown)"))
             truncated = true
         }

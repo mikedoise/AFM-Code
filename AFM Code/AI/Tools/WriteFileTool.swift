@@ -22,20 +22,38 @@ nonisolated struct WriteFileTool: Tool {
 
     func call(arguments: Arguments) async throws -> String {
         try Task.checkCancellation()
-        guard await context.canOperate else {
-            return "The project folder is not available right now, so I can't write files. Ask the user to re-connect the project folder."
-        }
-
         let path = arguments.path
-        let diff = await context.previewDiffForWrite(path: path, newContent: arguments.content)
-
+        // Record the attempt before validation/preparation: failures here must
+        // be visible to the user as well as returned to the model.
         let stepID = await context.beginStep(
             kind: .write,
             toolName: name,
             title: "Write \(path)",
-            status: .awaiting,
-            diff: diff
+            status: .running
         )
+        let change: PreparedFileChange
+        do {
+            try Task.checkCancellation()
+            guard await context.canOperate else { throw ToolContext.ToolError.folderUnavailable }
+            change = try await context.prepareWrite(path: path, content: arguments.content)
+            try Task.checkCancellation()
+        } catch {
+            if error is CancellationError || Task.isCancelled {
+                await context.updateStep(stepID, status: .cancelled, summary: "stopped")
+                throw CancellationError()
+            }
+            let message = ReadFileTool.message(for: error)
+            await context.recordFileChangeFailure(stepID, phase: .preparation, error: error)
+            await context.updateStep(stepID, status: .failed, summary: message)
+            return "write_file failed: \(message)"
+        }
+        if change.isNoOp {
+            let summary = "No changes needed; the file is unchanged."
+            await context.updateStep(stepID, status: .done, summary: summary)
+            return summary
+        }
+        let diff = change.diff
+        await context.updateStep(stepID, status: .awaiting, diff: diff)
         let decision = await context.approvals.wait(for: stepID)
 
         switch decision {
@@ -48,11 +66,16 @@ nonisolated struct WriteFileTool: Tool {
         case .approve, .alwaysAllow:
             await context.updateStep(stepID, status: .approved, summary: nil, diff: diff)
             do {
-                let summary = try await context.writeFile(path: path, content: arguments.content)
+                let summary = try await context.applyChange(change)
                 await context.updateStep(stepID, status: .done, summary: summary, diff: diff)
                 return summary
             } catch {
+                if error is CancellationError || Task.isCancelled {
+                    await context.updateStep(stepID, status: .cancelled, summary: "stopped")
+                    throw CancellationError()
+                }
                 let message = ReadFileTool.message(for: error)
+                await context.recordFileChangeFailure(stepID, phase: .apply, error: error)
                 await context.updateStep(stepID, status: .failed, summary: message, diff: diff)
                 return "write_file failed: \(message)"
             }

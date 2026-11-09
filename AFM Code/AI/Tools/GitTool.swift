@@ -3,9 +3,9 @@ import FoundationModels
 
 /// Queries the project's Git repository (read-only).
 ///
-/// Read-only by construction: every action maps to a git command that
-/// neither writes to the repository nor triggers hooks, so — like `search`
-/// — it runs without an approval step. Commit *writes* (add/commit/push)
+/// Uses a fixed set of read-oriented Git commands, without requesting
+/// repository mutations. External diff/textconv/fsmonitor helpers and optional
+/// index writes are disabled. Repository-changing commands (add/commit/push)
 /// deliberately go through `run_command` with its approval flow.
 ///
 /// This is the model's door into commit history: `search` only sees
@@ -14,6 +14,8 @@ import FoundationModels
 nonisolated struct GitTool: Tool {
     let context: ToolContext
 
+    private static let readCommandPrefix = "git --no-pager --no-optional-locks -c core.fsmonitor=false -c log.showSignature=false"
+
     let name = "git"
     let description = """
     Query the project's git repository (read-only; runs without approval). \
@@ -21,12 +23,14 @@ nonisolated struct GitTool: Tool {
     Actions: log = find commits (by message text, code pickaxe, or path); \
     blame = who/when a file or line region last changed; \
     show = what a commit changed; diff = uncommitted changes; \
-    status = working tree state; branch = branch list.
+    status = working tree state; branch = branch list. \
+    For user-requested pull, fetch, add, commit, merge, rebase, switch, checkout, push \
+    or other repository changes, use run_command with the full Git command and its approval flow.
     """
 
     @Generable
     struct Arguments {
-        @Guide(description: "One of: log, blame, show, diff, status, branch.")
+        @Guide(description: "One of: log, blame, show, diff, status, branch. For pull/fetch or other changes, use run_command instead.")
         var action: String
 
         @Guide(description: "Optional. For log: text to search for — commit messages by default, or code that was added/removed when pickaxe is true.")
@@ -56,10 +60,14 @@ nonisolated struct GitTool: Tool {
 
         let action = arguments.action.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-        guard let command = Self.command(for: action, arguments: arguments) else {
-            return "Unknown git action \"\(arguments.action)\". Valid actions: log, blame, show, diff, status, branch."
+        if let ref = arguments.ref?.trimmingCharacters(in: .whitespacesAndNewlines), ref.hasPrefix("-") {
+            return "Invalid git ref: pass a commit, branch, tag or revision range, not a command-line option."
         }
-        guard !Self.actionNeedsPath(action) || arguments.path != nil else {
+
+        guard let command = Self.command(for: action, arguments: arguments) else {
+            return "Unknown git action \"\(arguments.action)\". This git tool is read-only. Valid actions: log, blame, show, diff, status, branch. For user-requested pull, fetch or other repository changes, call run_command with the full Git command; project approval still applies. Nothing was executed."
+        }
+        guard !Self.actionNeedsPath(action) || arguments.path?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
             return "git blame needs a file path — pass the path argument (for example \"src/Main.swift\")."
         }
 
@@ -74,7 +82,22 @@ nonisolated struct GitTool: Tool {
         )
 
         do {
-            let run = try await context.runCommand(command: command, timeout: 30)
+            // Even a read-oriented Git command may run repository-configured
+            // clean/process filters. Inspect names only, including effective
+            // global/worktree/includes config, and never cache a safe result.
+            let filterCheck = try await context.runReadOnlyCommand(
+                command: Self.readCommandPrefix + " config --includes --name-only --get-regexp '^filter\\.'", timeout: 5)
+            if filterCheck.timedOut || (filterCheck.exitCode != 0 && filterCheck.exitCode != 1) {
+                let detail = "Could not check Git filter configuration. Nothing else was executed.\n" + filterCheck.output
+                await context.updateStep(stepID, status: .failed, summary: "Git configuration check failed", detail: detail)
+                return detail
+            }
+            if filterCheck.exitCode == 0 {
+                let detail = "This repository has Git filter configuration, which can run external programs even for reads. Use run_command with the requested full Git command and its project approval flow. This git read action was not executed."
+                await context.updateStep(stepID, status: .failed, summary: "Use an approved command for configured Git filters", detail: detail)
+                return detail
+            }
+            let run = try await context.runReadOnlyCommand(command: command, timeout: 30)
             let output = Self.present(
                 action: action, arguments: arguments, limit: limit, run: run
             )
@@ -90,6 +113,10 @@ nonisolated struct GitTool: Tool {
             }
             return output
         } catch {
+            if error is CancellationError || Task.isCancelled {
+                await context.updateStep(stepID, status: .cancelled, summary: "stopped")
+                throw CancellationError()
+            }
             let message = ReadFileTool.message(for: error)
             await context.updateStep(stepID, status: .failed, summary: message)
             return "git \(action) failed: \(message)"
@@ -112,8 +139,8 @@ nonisolated struct GitTool: Tool {
     /// The exact zsh command for one action, or `nil` for an unknown action.
     ///
     /// Every model-supplied value is shell-quoted, and every action is
-    /// read-only (no hooks, no writes), so the command is safe to run
-    /// without an approval step.
+    /// drawn from the read-only action set. Option-like refs are rejected;
+    /// repository-changing commands belong in the approved run_command tool.
     static func command(for action: String, arguments: Arguments) -> String? {
         let limit = limit(for: action, requested: arguments.limit)
         let query = arguments.query?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -122,6 +149,10 @@ nonisolated struct GitTool: Tool {
         let hasPath = (path?.isEmpty == false)
         let ref = arguments.ref?.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasRef = (ref?.isEmpty == false)
+        guard ref?.hasPrefix("-") != true else { return nil }
+        // Suppress optional index state and the explicitly configured
+        // fsmonitor/diff/textconv helpers. Mutations use run_command.
+        let git = Self.readCommandPrefix
         // Local quote helper: ToolContext.shellQuote is main-actor isolated
         // and this builder is not.
         func q(_ value: String) -> String {
@@ -130,7 +161,7 @@ nonisolated struct GitTool: Tool {
 
         switch action {
         case "log":
-            var parts = ["git log"]
+            var parts = ["\(git) log --no-ext-diff --no-textconv"]
             if hasRef { parts.append(q(ref!)) } else { parts.append("--all") }
             parts.append("-n \(limit)")
             parts.append("--date=short")
@@ -146,29 +177,29 @@ nonisolated struct GitTool: Tool {
             return parts.joined(separator: " ")
 
         case "blame":
-            var parts = ["git blame", "-w"]
+            var parts = ["\(git) blame --no-textconv", "-w"]
             let start = max(arguments.line ?? 1, 1)
             parts.append("-L \(start),+\(limit)")
             if hasPath { parts.append("-- \(q(path!))") }
             return parts.joined(separator: " ")
 
         case "show":
-            var parts = ["git show", "--stat", "--date=short",
-                         "--format=%h %ad %an %s",
+            var parts = ["\(git) show --no-ext-diff --no-textconv", "--stat", "--date=short",
+                         "--format=" + q("%h %ad %an %s"),
                          q(hasRef ? ref! : "HEAD")]
             if hasPath { parts.append("-- \(q(path!))") }
-            return parts.joined(separator: " ") + " | head -n \(limit)"
+            return parts.joined(separator: " ")
 
         case "diff":
             let scope = hasPath ? " -- \(q(path!))" : ""
             let scopeRef = hasRef ? " \(q(ref!))" : ""
-            return "git diff --stat\(scopeRef)\(scope); git diff\(scopeRef)\(scope) | head -n \(limit)"
+            return "\(git) diff --no-ext-diff --no-textconv --stat\(scopeRef)\(scope) && \(git) diff --no-ext-diff --no-textconv\(scopeRef)\(scope)"
 
         case "status":
-            return "git status --porcelain=v1 -b"
+            return "\(git) status --porcelain=v1 -b"
 
         case "branch":
-            return "git branch -av | head -n \(limit)"
+            return "\(git) branch -av"
 
         default:
             return nil
@@ -208,8 +239,22 @@ nonisolated struct GitTool: Tool {
                 output = "(no output)"
             }
         }
-        // `git show`/`git diff` are already line-capped with `head`; cap
-        // characters so a wide line can't blow out the context window.
+        if run.exitCode != 0 || run.timedOut {
+            // stderr is appended after stdout by the bounded process runner.
+            // Keep the tail on failure so truncation cannot hide the Git error.
+            if output.count > 16_000 { output = "… (earlier output truncated)\n" + output.suffix(16_000) }
+            return output
+        }
+        // Cap in Swift, not a shell pipeline: head hides git's failure status
+        // and pipefail can turn successful truncation into a SIGPIPE error.
+        if ["show", "diff", "branch"].contains(action) {
+            let lines = output.components(separatedBy: "\n")
+            if lines.count > limit {
+                output = lines.prefix(limit).joined(separator: "\n") + "\n… (truncated)"
+            }
+        }
+        // Also bound wide lines. The process runner drains both pipes while
+        // retaining only its bounded capture, even if the full output is huge.
         if output.count > 16_000 {
             output = String(output.prefix(16_000)) + "\n… (truncated)"
         }

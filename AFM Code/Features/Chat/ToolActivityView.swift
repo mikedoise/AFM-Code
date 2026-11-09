@@ -61,6 +61,12 @@ struct ToolStepView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             }
 
+            if step.kind == .mcp, let detail = step.detail {
+                Text("Arguments")
+                    .font(.caption.weight(.semibold))
+                detailText(detail)
+            }
+
             if let diff = step.diff {
                 DiffView(diff: diff)
             }
@@ -148,6 +154,9 @@ struct ToolStepView: View {
             }
             .buttonStyle(.plain)
             .disabled(!hasPayload)
+            .accessibilityLabel(step.title)
+            .accessibilityValue([step.accessibilityStatus, step.summary, hasPayload ? (isExpanded ? "Expanded" : "Collapsed") : nil].compactMap { $0 }.joined(separator: ". "))
+            .accessibilityHint(hasPayload ? "Shows or hides tool details" : "")
 
             if isExpanded, hasPayload {
                 payload

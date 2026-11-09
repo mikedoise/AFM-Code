@@ -68,10 +68,15 @@ struct ChatView: View {
             }
             engine?.prewarm()
         }
+        .onChange(of: engine?.activeModel?.id) { _, _ in
+            engine?.prewarm()
+        }
+        .onDisappear {
+            engine?.cancelPrewarm()
+        }
         .task(id: downloadSignature) {
             await catalog.refreshMlxModels()
         }
-        .id(session.id)
         .focusedSceneValue(\.afmDetailCommands, detailCommands)
     }
 
@@ -162,7 +167,7 @@ struct ChatView: View {
     /// device model. Double-tap to choose the model."
     private var accessibilityTitle: String {
         let title = session.title.isEmpty ? "Chat" : session.title
-        let model = (engine?.activeModel ?? catalog.activeDescriptor)?.displayName
+        let model = (engine?.activeModel ?? catalog.selectedDescriptor(for: session))?.displayName
         return model.map { "\(title), \($0)" } ?? title
     }
 
@@ -184,7 +189,7 @@ struct ChatView: View {
                         .imageScale(.small)
                 }
 
-                if let model = engine?.activeModel ?? catalog.activeDescriptor {
+                if let model = engine?.activeModel ?? catalog.selectedDescriptor(for: session) {
                     HStack(spacing: 5) {
                         Circle()
                             .fill(
@@ -214,7 +219,7 @@ struct ChatView: View {
             showModelPicker.toggle()
         }
         .popover(isPresented: $showModelPicker, arrowEdge: .top) {
-            ModelPickerPanel(session: session, catalog: catalog)
+            ModelPickerPanel(session: session, catalog: catalog, isBusy: engine?.isBusy == true || engine?.isCompacting == true)
                 .frame(
                     minWidth: 360, idealWidth: 480, maxWidth: 560,
                     minHeight: 300, idealHeight: 440, maxHeight: 560

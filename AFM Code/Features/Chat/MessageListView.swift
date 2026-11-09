@@ -132,7 +132,8 @@ struct MessageListView: View {
     /// tool, the way Perspective Intelligence prefixes its statuses.
     private var liveStatusText: String? {
         guard engine?.isBusy == true else { return nil }
-        let name = (engine?.activeModel ?? catalog.activeDescriptor)?.displayName ?? "Assistant"
+        let name = (engine?.activeModel ?? catalog.selectedDescriptor(for: session))?.displayName ?? "Assistant"
+        if engine?.isPreparingCoreAI == true { return "\(name) is preparing the model…" }
         let steps = engine?.toolSteps ?? []
         if steps.contains(where: { $0.status == .awaiting }) {
             if let step = steps.last(where: { $0.status == .awaiting }) {

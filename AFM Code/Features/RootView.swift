@@ -131,6 +131,7 @@ struct RootView: View {
         case .session(let id):
             if let session = sessions.first(where: { $0.id == id }) {
                 ChatView(session: session)
+                    .id(session.id)
             } else {
                 EmptyDetailView(hasProjects: projects.isEmpty)
             }
@@ -158,7 +159,7 @@ private struct EmptyDetailView: View {
                 : "Add a folder to work in, and chat with the on-device model about it.")
                 .foregroundStyle(.secondary)
             if hasProjects {
-                ModelBadgeView()
+                ModelBadgeView(status: catalog.status(for: catalog.activeDescriptor, role: .appDefault))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

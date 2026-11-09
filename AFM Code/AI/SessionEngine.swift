@@ -1,5 +1,6 @@
 import Foundation
 import FoundationModels
+import CoreAILanguageModels
 import ImageIO
 import MLXFoundationModels
 import Observation
@@ -46,6 +47,7 @@ final class SessionEngine {
     private enum ModelSource {
         case afm
         case mlx(MlxModel)
+        case coreAI(String)
     }
 
     private(set) var state: State = .idle
@@ -71,6 +73,15 @@ final class SessionEngine {
     private var mlxTokenizerRepoID: String?
 
     private var languageModelSession: LanguageModelSession?
+    private var configuredModelID: String?
+    private var turnModel: ModelDescriptor?
+    private var lastAttemptedModelID: String?
+    private var configuredSource: ModelSource?
+    private var coreAIModel: CoreAILanguageModel?
+    private(set) var isPreparingCoreAI = false
+    private(set) var coreAIPerformanceSummary: String?
+    private var coreAITurnStarted: Double?
+    private var coreAIPreparation: CoreAIPreparationMetrics?
     private var sendTask: Task<Void, Never>?
     /// Whether the model session was created with the coding tools.
     private var sessionHasTools = false
@@ -106,46 +117,34 @@ final class SessionEngine {
 
     // MARK: - Derived state
 
-    var isBusy: Bool { state == .responding }
+    var isBusy: Bool { state == .responding || sendTask != nil }
 
     var errorMessage: String? {
         if case .error(let message) = state { return message }
         return nil
     }
 
-    /// The model this session will prompt: the session's explicit
-    /// choice, then the project's default, then the best available.
+    /// Selection follows session override, project default, then Automatic.
+    /// An in-flight turn keeps the model that actually received the request.
     var activeModel: ModelDescriptor? {
-        if let kind = session.modelKind {
-            return Self.resolveModelKind(kind, mlxModelID: session.mlxModelID, catalog: catalog)
-        }
-        if let kind = session.project?.modelKind {
-            return Self.resolveModelKind(kind, mlxModelID: session.project?.mlxModelID, catalog: catalog)
-        }
-        return catalog.activeDescriptor
+        ModelSelectionResolver.activeModel(selected: catalog.selectedDescriptor(for: session), inFlight: turnModel)
     }
 
-    /// The session's explicit (or inherited) choice as a descriptor:
-    /// the kind always resolves; an MLX choice resolves to the specific
-    /// library model, and a choice whose model left the library falls
-    /// through to the best available rather than pointing at nothing.
-    private static func resolveModelKind(
-        _ kind: ModelDescriptor.Kind,
-        mlxModelID: String?,
-        catalog: ModelCatalog
-    ) -> ModelDescriptor? {
-        if kind == .mlx {
-            if let mlxModelID, let descriptor = catalog.descriptor(for: .mlx, mlxRepoID: mlxModelID) {
-                return descriptor
-            }
-            return catalog.activeDescriptor
-        }
-        return catalog.descriptor(for: kind)
+    var modelStatus: ModelStatus {
+        let model = activeModel
+        return catalog.status(for: model, preparing: isPreparingCoreAI,
+            inUse: isBusy || isCompacting,
+            failure: lastAttemptedModelID == model?.id ? errorMessage : nil)
     }
 
     /// Where this session's prompts actually go, resolved the same way
     /// as `activeModel` — the two must never disagree.
-    private var modelSource: ModelSource {
+    private var modelSource: ModelSource { configuredSource ?? requestedModelSource }
+
+    private var requestedModelSource: ModelSource {
+        if let descriptor = activeModel, descriptor.kind == .coreAI {
+            return .coreAI(descriptor.coreAIModelID ?? "")
+        }
         guard let descriptor = activeModel, descriptor.kind == .mlx,
               let repoID = descriptor.mlxRepoID,
               let mlxModel = mlx.model(forRepoID: repoID)
@@ -171,9 +170,25 @@ final class SessionEngine {
     /// Lazily create the underlying `LanguageModelSession` on the
     /// session's model, resuming from the persisted transcript when
     /// one exists.
-    private func ensureLanguageModelSession() {
+    private func ensureLanguageModelSession() async throws {
+        let source = requestedModelSource
+        if activeModel?.kind != .coreAI { catalog.coreAI.unloadIdleModel() }
+        if configuredModelID != activeModel?.id || activeModel?.kind == .coreAI {
+            languageModelSession = nil
+            effectiveContextSize = nil
+            contextTokenCount = nil
+            mlxTokenizer = nil
+            mlxTokenizerRepoID = nil
+        }
+        configuredModelID = activeModel?.id
+        configuredSource = source
         guard languageModelSession == nil else { return }
-        switch modelSource {
+        switch source {
+        case .coreAI(let id):
+            let model = try await catalog.coreAI.prepare(id: id, sessionID: session.id)
+            coreAIModel = model
+            coreAIPreparation = catalog.coreAI.preparationMetrics
+            configureSession(model: model, supportsTools: model.capabilities.contains(.toolCalling))
         case .afm:
             let model = SystemLanguageModel.default
             // Tools only when the model variant supports them and
@@ -245,7 +260,7 @@ final class SessionEngine {
             )
         }
         languageModelSession?.transcriptErrorHandlingPolicy = .revertTranscript
-        prewarm()
+        if coreAIModel == nil { prewarm() }
 
         // Measure the baseline (system prompt, instructions, restored
         // transcript) so the context gauge shows the session's starting
@@ -293,13 +308,26 @@ final class SessionEngine {
 
     /// Ask the framework to load and cache the session ahead of a turn.
     func prewarm() {
+        if let descriptor = activeModel, descriptor.kind == .coreAI, let id = descriptor.coreAIModelID {
+            catalog.coreAI.prewarm(id: id, sessionID: session.id)
+            return
+        }
+        catalog.coreAI.cancelPrewarm(for: session.id)
+        catalog.coreAI.unloadIdleModel()
         languageModelSession?.prewarm()
+    }
+
+    var isPrewarmingCoreAI: Bool { catalog.coreAI.isPrewarming(for: session.id) }
+
+    func cancelPrewarm() {
+        catalog.coreAI.cancelPrewarm(for: session.id)
     }
 
     /// Prewarm with the user's draft so the first token of the next
     /// turn arrives faster. Best-effort: the draft is treated as a
     /// prefix of the prompt that will actually be sent.
     func prewarm(draft: String) {
+        guard activeModel?.kind != .coreAI else { return }
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             prewarm()
@@ -327,25 +355,47 @@ final class SessionEngine {
         guard !trimmed.isEmpty, !isBusy, !isCompacting else { return }
 
         let selectedModel = activeModel
+        lastAttemptedModelID = selectedModel?.id
         guard let selectedModel, selectedModel.isAvailable else {
             state = .error(selectedModel?.availabilityDetail ?? "No model is available on this Mac.")
             return
         }
 
-        persistUserMessage(trimmed, images: images)
-        ensureLanguageModelSession()
-        guard languageModelSession != nil else {
-            state = .error("Could not start the model session.")
+        guard images.isEmpty || selectedModel.capabilities.contains("vision") else {
+            state = .error("The selected model does not support images. Remove the attachments or choose a vision model.")
             return
         }
-
-        // Set synchronously so a rapid double-send can't start a second
-        // turn; `attemptTurn` re-establishes both on the compaction
-        // retry.
+        // Reserve synchronously, including asynchronous Core AI initialization.
+        turnModel = selectedModel
         state = .responding
         streamingText = ""
+        isPreparingCoreAI = selectedModel.kind == .coreAI
+        coreAITurnStarted = selectedModel.kind == .coreAI ? ProcessInfo.processInfo.systemUptime : nil
+        coreAIPreparation = nil
+        coreAIPerformanceSummary = nil
         sendTask = Task { [weak self] in
-            await self?.runTurn(prompt: trimmed, images: images)
+            guard let self else { return }
+            defer {
+                catalog.coreAI.finish(sessionID: session.id, keepResident: state == .idle && !Task.isCancelled)
+                isPreparingCoreAI = false
+                if coreAIModel != nil {
+                    languageModelSession = nil
+                    coreAIModel = nil
+                }
+                sendTask = nil
+                turnModel = nil
+            }
+            do {
+                try await ensureLanguageModelSession()
+                isPreparingCoreAI = false
+                try Task.checkCancellation()
+                persistUserMessage(trimmed, images: images)
+                await runTurn(prompt: trimmed, images: images)
+            } catch is CancellationError {
+                state = .idle
+            } catch {
+                state = .error(error.localizedDescription)
+            }
         }
     }
 
@@ -466,10 +516,16 @@ final class SessionEngine {
         streamingReasoning = ""
 
         var options = GenerationOptions()
+        if coreAIModel != nil {
+            options.maximumResponseTokens = min(2048, max(128, (contextSize ?? 4096) / 4))
+        }
         if sessionHasTools {
             options.toolCallingMode = .allowed
         }
 
+        let usageAttempt = TokenUsageStore.shared.begin(model: activeModel, purpose: .response)
+        let usageBefore = languageModelSession.usage
+        defer { TokenUsageStore.shared.finishUnreported(usageAttempt) }
         do {
             // Phase 9: if images are attached, add them to the session's
             // transcript before sending so vision-capable models can see them.
@@ -478,12 +534,28 @@ final class SessionEngine {
                 appendImageAttachments(to: &mutableTranscript, images: images)
                 languageModelSession.transcript = mutableTranscript
             }
+            let responseStarted = ProcessInfo.processInfo.systemUptime
+            var firstTextSeconds: Double?
             let stream = languageModelSession.streamResponse(to: Prompt(prompt), options: options)
             for try await snapshot in stream {
+                if firstTextSeconds == nil, !snapshot.content.isEmpty {
+                    firstTextSeconds = ProcessInfo.processInfo.systemUptime - responseStarted
+                }
                 streamingText = snapshot.content
                 updateStreamingReasoning(from: snapshot.transcriptEntries)
             }
             let response = try await stream.collect()
+            TokenUsageStore.shared.finish(usageAttempt,
+                inputBefore: usageBefore.input.totalTokenCount, outputBefore: usageBefore.output.totalTokenCount,
+                inputAfter: languageModelSession.usage.input.totalTokenCount, outputAfter: languageModelSession.usage.output.totalTokenCount)
+            if let preparation = coreAIPreparation, let turnStarted = coreAITurnStarted {
+                let responseSeconds = ProcessInfo.processInfo.systemUptime - responseStarted
+                let totalSeconds = ProcessInfo.processInfo.systemUptime - turnStarted
+                let firstText = firstTextSeconds.map { String(format: "%.2f s", $0) } ?? "none"
+                let mode = preparation.reusedModel ? "Model reused" : "Model loaded"
+                coreAIPerformanceSummary = "\(mode) · prepare \(String(format: "%.2f", preparation.totalSeconds)) s · first text \(firstText) · response \(String(format: "%.2f", responseSeconds)) s · \(response.usage.output.totalTokenCount) output tokens"
+                Self.logger.info("Core AI timings: reused \(preparation.reusedModel), prepare \(preparation.totalSeconds) s, tokenizer \(preparation.tokenizerSeconds) s, engine \(preparation.engineSeconds) s, prewarm wait \(preparation.prewarmWaitSeconds) s, first text \(firstText), response \(responseSeconds) s, total \(totalSeconds) s, output tokens \(response.usage.output.totalTokenCount)")
+            }
             finalizeAssistantResponse(response)
             state = .idle
             return false
@@ -644,8 +716,8 @@ final class SessionEngine {
         let steps = toolContext?.turnSteps ?? []
         guard !text.isEmpty || !steps.isEmpty else { return }
         let message = Message(role: .assistant, content: text)
-        message.tokenCount = response.usage.totalTokenCount
-        lastResponseTokens = response.usage.totalTokenCount
+        message.tokenCount = response.usage.output.totalTokenCount
+        lastResponseTokens = response.usage.output.totalTokenCount
         message.toolActivity = steps.isEmpty ? nil : steps
         message.thinkingContent = currentThinkingContent
         message.modelID = activeModel?.id
@@ -686,6 +758,8 @@ final class SessionEngine {
         guard let languageModelSession else { return }
         let used: Int?
         switch modelSource {
+        case .coreAI:
+            used = coreAIModel?.inputTokenCount(for: Array(languageModelSession.transcript), tools: sessionTools.map { Transcript.ToolDefinition(tool: $0) })
         case .afm:
             let model = SystemLanguageModel.default
             guard model.isAvailable else { return }
@@ -716,6 +790,8 @@ final class SessionEngine {
     /// made (weights not downloaded yet, …).
     private func tokenCount(for entries: [Transcript.Entry]) async -> Int? {
         switch modelSource {
+        case .coreAI:
+            return coreAIModel?.inputTokenCount(for: entries, tools: sessionTools.map { Transcript.ToolDefinition(tool: $0) })
         case .afm:
             let model = SystemLanguageModel.default
             guard model.isAvailable else { return nil }
@@ -809,6 +885,9 @@ final class SessionEngine {
         // A disposable, tool-free session on the session's own model
         // does the summarizing; it never touches the live transcript.
         switch modelSource {
+        case .coreAI:
+            guard let model = coreAIModel else { return false }
+            return await summarize(model: model, entries: entries, oldEntries: oldEntries, splitIndex: splitIndex)
         case .afm:
             return await summarize(
                 model: SystemLanguageModel.default,
@@ -840,13 +919,35 @@ final class SessionEngine {
         let summarizer = LanguageModelSession(model: model, tools: [], instructions: instructions)
         var options = GenerationOptions()
         options.maximumResponseTokens = 1200
+        var summaryPrompt = Self.renderConversation(oldEntries)
+        if let coreAIModel, let limit = contextSize {
+            let outputBudget = min(1200, max(128, limit / 4))
+            options.maximumResponseTokens = outputBudget
+            // Rendering can expand tokens. Admit the actual tool-free summary
+            // transcript, rather than trying to summarize an overflowing prompt.
+            while true {
+                let promptEntry = Transcript.Entry.prompt(Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: summaryPrompt))]))
+                let count = coreAIModel.inputTokenCount(for: Array(summarizer.transcript) + [promptEntry])
+                if count + outputBudget + 64 <= limit { break }
+                guard summaryPrompt.count > 256 else { return false }
+                summaryPrompt = "[Older history shortened to fit the model window.]\n"
+                    + String(summaryPrompt.suffix(summaryPrompt.count * 3 / 4))
+            }
+        }
 
+        let usageAttempt = TokenUsageStore.shared.begin(model: activeModel, purpose: .compaction)
+        let usageBefore = summarizer.usage
+        defer { TokenUsageStore.shared.finishUnreported(usageAttempt) }
         do {
             let stream = summarizer.streamResponse(
-                to: Prompt(Self.renderConversation(oldEntries)),
+                to: Prompt(summaryPrompt),
                 options: options
             )
             let response = try await stream.collect()
+            TokenUsageStore.shared.finish(usageAttempt,
+                inputBefore: usageBefore.input.totalTokenCount, outputBefore: usageBefore.output.totalTokenCount,
+                inputAfter: summarizer.usage.input.totalTokenCount, outputAfter: summarizer.usage.output.totalTokenCount)
             let summary = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !summary.isEmpty else { return false }
             rebuildSession(entries: entries, from: splitIndex, summary: summary, model: model)
@@ -901,7 +1002,7 @@ final class SessionEngine {
         )
         newSession.transcriptErrorHandlingPolicy = .revertTranscript
         languageModelSession = newSession
-        newSession.prewarm()
+        if coreAIModel == nil { newSession.prewarm() }
     }
 
     /// The summarizer's system prompt: a "memory compressor".

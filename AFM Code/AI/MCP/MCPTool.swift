@@ -65,11 +65,13 @@ nonisolated struct MCPTool: Tool {
             kind: .mcp,
             toolName: name,
             title: name,
-            status: await context.approvals.commandIsAllowed(allowlistKey) ? .running : .awaiting,
+            status: await context.approvals.commandIsAllowed(allowlistKey, scope: .mcp) ? .running : .awaiting,
             command: allowlistKey
         )
 
-        let decision = await context.approvals.wait(for: stepID, command: name)
+        // Make the requested inputs inspectable before granting execution.
+        await context.updateStep(stepID, detail: arguments.jsonString)
+        let decision = await context.approvals.wait(for: stepID, command: name, scope: .mcp)
 
         switch decision {
         case .deny:
@@ -81,6 +83,7 @@ nonisolated struct MCPTool: Tool {
         case .approve, .alwaysAllow:
             await context.updateStep(stepID, status: .approved, summary: nil)
             do {
+                try Task.checkCancellation()
                 let output = try await host.callTool(
                     serverID: serverID,
                     toolName: toolName,
@@ -94,6 +97,10 @@ nonisolated struct MCPTool: Tool {
                 )
                 return output
             } catch {
+                if error is CancellationError || Task.isCancelled {
+                    await context.updateStep(stepID, status: .cancelled, summary: "stopped")
+                    throw CancellationError()
+                }
                 let message = Self.message(for: error)
                 await context.updateStep(stepID, status: .failed, summary: message)
                 return "\(name) failed: \(message)"
