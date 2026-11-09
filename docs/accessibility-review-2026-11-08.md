@@ -45,3 +45,28 @@ Xcode removed the old DerivedData product bundle as stale while building to a se
 ## Deferred scope
 
 OpenCode/tool-harness investigation remains outstanding, including the exact arguments behind the EditFileTool generated-content parse failure. No parser bytes, file mutation logic or approval gates were changed. Functional requests #18, #29, #30, #33 and #35 remain separate.
+
+## Authorized launch and runtime verification
+
+Taylor authorized opening the updated build. The app was launched and its live AX tree inspected. A later process check did not find that initial process; no matching AFM crash report was found, so its exit cause is unconfirmed. Reopened the authorized build and verified PID 83204 executing `/Users/taylorarndt/Developer/AFM-Code-accessibility-build/Debug/AFM Code.app/Contents/MacOS/AFM Code`, bundle ID `app.techopolis.AFMCode`, version 1.0. The source implementation is commit b7824bb.
+
+Passed live checks:
+
+- Chat exposes Your message / Assistant message headings and read-only response text, separately from the editable Message AFM Code composer.
+- Preparing and Loaded badge labels are concise and model-first. Chat title exposes name, Context window and Modalities in one label. Context text includes percent used and tokens left.
+- Command-comma opens Settings with System Prompt focused and named.
+- Tab from System Prompt moves to Manage Local Models; Shift-Tab returns to System Prompt without entering text.
+- Usage and model metrics are separate labeled elements. Announcement switches have purpose descriptions.
+- Model library exposes readable Gemma identity, context and modality together; original identifier and file path separately; Remove and Unload name the model.
+- Add by repository ID toggles Expanded/Collapsed and exposes a named Repository ID field. No repository was submitted.
+- Closed model management and Settings, returning to chat with the empty composer focused. No prompt was sent and no operation was approved.
+
+Remaining observations/limits:
+
+- Actual VoiceOver speech order, heading-rotor use and nested interaction exits still need Taylor's verification. The Settings traversal check covers the editor/management-button transition, not every control.
+- System Prompt has the correct name but its native help still says “Enter the message to send”; the outer SwiftUI hint did not override native help.
+- Model detail badges expose the intended label/help but appear as `unknown` in this AX tool; their button role/activation needs follow-up verification.
+- MCP editor modes, collapsed reasoning, populated MLX states and diff/approval counts were not exercised in this live check. Contrast and Dynamic Type remain unchecked.
+- An initial UI action encountered user navigation/inactive-tool protection. A later Command-W/Command-L sequence timed out, but the next AX snapshot confirmed Settings closed and the chat composer focused. These tool results are not evidence of an application crash.
+
+GitHub PR workflow was subsequently authorized. A Taylor-owned fork was created because direct upstream push returned 403; credentials were not changed.
